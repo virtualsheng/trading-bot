@@ -9,7 +9,7 @@ def compute_rsi(series: pd.Series, period: int = 14):
     loss = -delta.clip(upper=0).rolling(window=period).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
+    return rsi.fillna(50)   # Prevents NaN issues on short data
 
 def compute_macd(series: pd.Series):
     ema12 = compute_ema(series, 12)

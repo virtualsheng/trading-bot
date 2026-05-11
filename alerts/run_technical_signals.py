@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 from datetime import datetime
 import pytz
 
-# Fix import path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from strategies.signal_engine import get_technical_signal
@@ -31,7 +30,7 @@ SYMBOLS = ["SPY", "QQQ", "TQQQ", "SQQQ", "DRAM", "SMH", "SPMO", "EWT", "DBMF", "
 
 def main():
     if not API_KEY or not SECRET_KEY:
-        print("❌ Missing ALPACA_API_KEY or ALPACA_SECRET_KEY in .env")
+        print("❌ Missing ALPACA_API_KEY or ALPACA_API_SECRET in .env")
         return
 
     est = pytz.timezone("US/Eastern")
@@ -51,14 +50,14 @@ def main():
             
             action = result.get("action", "ERROR")
             rsi = result.get("rsi", "N/A")
-            bull = result.get("bull_score", "?")
-            bear = result.get("bear_score", "?")
+            bull = result.get("bull_score", "N/A")
+            bear = result.get("bear_score", "N/A")
             error = result.get("error", "")
 
             if error:
-                line = f"{symbol}: ❌ ERROR - {error[:60]}"
+                line = f"{symbol}: ❌ ERROR - {error[:80]}"
             else:
-                line = f"{symbol}: {action:<12} | RSI={rsi} | Bull={bull} Bear={bear}"
+                line = f"{symbol}: {action:<12} | RSI={rsi} | Bull={bull} | Bear={bear}"
             
             print(line)
             results.append(line)
@@ -68,26 +67,25 @@ def main():
             print(error_line)
             results.append(error_line)
 
-    # Send notifications
     body = "\n".join(results)
     
     try:
         send_email(header, body)
-        print("\n✅ Email sent successfully")
+        print("\n✅ Email sent")
     except Exception as e:
-        print(f"⚠️  Email failed: {e}")
+        print(f"⚠️ Email failed: {e}")
 
     try:
         send_discord_message(body)
-        print("✅ Discord message sent")
+        print("✅ Discord sent")
     except Exception as e:
-        print(f"⚠️  Discord failed: {e}")
+        print(f"⚠️ Discord failed: {e}")
 
     try:
         send_telegram_message(body)
-        print("✅ Telegram message sent")
+        print("✅ Telegram sent")
     except Exception as e:
-        print(f"⚠️  Telegram failed: {e}")
+        print(f"⚠️ Telegram failed: {e}")
 
 
 if __name__ == "__main__":

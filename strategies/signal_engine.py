@@ -3,6 +3,8 @@ Technical Signal Engine - Afternoon Analysis
 Momentum + EMA crossover + trend logic
 """
 
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
