@@ -2,6 +2,7 @@
 
 - Morning **Opening Range Breakout (ORB)**
 - Afternoon **Momentum + EMA crossover + Trend signals**
+- The Hierarchy: The 3:50 PM alert is the Primary Signal. If the afternoon signal is "SELL," you should not be looking for "BUY" breakouts the next morning unless the trend resets.
 
 ## Features
 

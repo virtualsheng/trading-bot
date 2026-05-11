@@ -44,8 +44,29 @@ def get_price_data(
 
     # yfinance fallback
     try:
-        interval = "5m" if timeframe == TimeFrame(5, TimeFrameUnit.Minute) else "1d"
-        df = yf.download(symbol, period=f"{days+5}d", interval=interval, progress=False, prepost=True)
+        if timeframe == TimeFrame.Day:
+            # FIX: Fetch 1m data for the last 2 days to ensure today's "live" price is included
+            # This is crucial for the 3:50 PM signal accuracy.
+            hist = yf.download(symbol, period=f"{days+5}d", interval="1d", progress=False)
+            live_data = yf.download(symbol, period="1d", interval="1m", progress=False, prepost=True)
+            
+            if not live_data.empty:
+                # Resample 1m data into a single daily row for today
+                today_bar = live_data.resample('D').agg({
+                    'Open': 'first',
+                    'High': 'max',
+                    'Low': 'min',
+                    'Close': 'last',
+                    'Volume': 'sum'
+                }).dropna()
+                
+                # Update or append today's bar to history
+                df = pd.concat([hist[~hist.index.isin(today_bar.index)], today_bar])
+            else:
+                df = hist
+        else:
+            interval = "5m"
+            df = yf.download(symbol, period=f"{days+5}d", interval=interval, progress=False, prepost=True)
         
         if df.empty:
             raise ValueError("No data")
@@ -56,6 +77,8 @@ def get_price_data(
             df.index = df.index.tz_localize("US/Eastern")
         else:
             df.index = df.index.tz_convert("US/Eastern")
+            
         return df
     except Exception as e:
-        raise Exception(f"Both sources failed for {symbol}: {str(e)}")
+        print(f"Error fetching data for {symbol}: {e}")
+        return pd.DataFrame()
