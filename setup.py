@@ -13,5 +13,7 @@ setup(
         "pandas-ta",
         "alpaca-trade-api",
         "alpaca-py",
+	"requests",
+	"pytz",
     ],
 )

@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 from datetime import datetime
 
-from core.orb import get_orb_signal
+from core.signal_engine import get_technical_signal
 
 from notifications.emailer import send_email
 from notifications.discord import send_discord_message
@@ -46,22 +46,15 @@ def main():
 
     for symbol in SYMBOLS:
 
-        result = get_orb_signal(
-            symbol,
-            API_KEY,
-            SECRET_KEY
-        )
-
-        line = (
-            f"{symbol}: "
-            f"{result.get('signal')} | "
-            f"Current={result.get('current')} | "
-            f"OR High={result.get('or_high')} | "
-            f"OR Low={result.get('or_low')}"
-        )
-
+        result = get_orb_signal(symbol, API_KEY, SECRET_KEY)
+        sig = result.get("signal", "ERROR")
+        curr = result.get("current", "N/A")
+        high = result.get("or_high", "N/A")
+        low = result.get("or_low", "N/A")
+        reason = result.get("reason", "")
+        
+        line = f"{symbol}: {sig} | Current={curr} | OR High={high} | OR Low={low} | {reason}"
         print(line)
-
         results.append(line)
 
     body = "\n".join(results)

@@ -6,3 +6,5 @@ alpaca-trade-api
 alpaca-py
 yfinance
 pandas-ta
+requests
+pytz
