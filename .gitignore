@@ -1,0 +1,16 @@
+# Never commit these
+.env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.next/
+*.db
+*.sqlite
+logs/
+*.log
+
+# LumiBot cache
+data/
+backtesting_cache/
+tearsheets/
