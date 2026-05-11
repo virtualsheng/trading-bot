@@ -1,49 +1,49 @@
+# Technical Trading Bot (TQQQ/SQQQ Style)
 
-# Technical Bot
+This bot replicates the core logic used by **The Stocks Channel** (Cory):
+- Morning **Opening Range Breakout (ORB)**
+- Afternoon **Momentum + EMA crossover + Trend signals**
 
-Refactored architecture separating:
-- Alert scanners
-- Technical analysis engine
-- ORB engine
-- Notifications
-- Lumibot strategies
+## Features
+
+- Two daily alerts (9:45 AM & 3:50 PM ET)
+- ORB on 5-min chart (first 15 minutes)
+- Short-term momentum using 2/3 and 3/5 EMAs
+- Trend confirmation with SMA50/SMA200 + RSI + MACD
+- Multiple notification channels (Email, Discord, Telegram)
+- yfinance fallback (works even on free Alpaca)
 
 ## Folder Structure
 
-core/
-    data.py
-    indicators.py
-    orb.py
-
-strategies/
-    signal_engine.py
-    orb_strategy.py
-
-alerts/
-    run_orb_check.py
-    run_technical_signals.py
-
-notifications/
-    emailer.py
-    discord.py
-    telegram.py
-
-## Alert Schedules
-
-Morning ORB:
-9:45 AM ET
-
-Afternoon Technical Signals:
-3:50 PM ET
+technical-bot/
+├── alerts/                  # Daily runnable scripts
+│   ├── run_orb_check.py
+│   └── run_technical_signals.py
+├── core/                    # Core logic
+│   ├── data.py
+│   ├── indicators.py
+│   └── orb.py
+├── strategies/              # Signal engines
+│   ├── signal_engine.py
+│   └── orb_strategy.py
+├── notifications/
+├── runners/                 # Lumibot backtesting
+└── .env (copy from example.env)
 
 ## Setup
 
-1. Create virtual environment
-2. Install requirements
-3. Configure .env
-4. Run alert scripts
+1. `python -m venv venv`
+2. `venv\Scripts\activate` (Windows) or `source venv/bin/activate`
+3. `pip install -r requirements.txt`
+4. Copy `example.env` → `.env` and fill in your keys
+5. (Recommended) Use Gmail **App Password** for email
 
-Example:
+## Usage
 
+**Morning Alert (ORB):**
+```bash
 python alerts/run_orb_check.py
+
+**Afternoon Alert (Technical):**
+```bash
 python alerts/run_technical_signals.py
