@@ -1,5 +1,14 @@
+"""
+Morning ORB (Opening Range Breakout) check.
+Run via cron at 9:45am EST on weekdays:
+  45 9 * * 1-5 python alerts/run_orb_check.py
 
-import os
+Checks if QQQ has broken above or below its first 15-min range.
+This is the morning version of the 9:15-9:45am alerts.
+"""
+
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 from datetime import datetime

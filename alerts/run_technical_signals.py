@@ -1,5 +1,15 @@
+"""
+End-of-day technical signal check.
+Run via cron at 3:50pm EST on weekdays:
+  50 15 * * 1-5 python alerts/run_technical_signals.py
 
-import os
+Reads daily bars, computes EMA/RSI/MACD signals,
+and prints a clear BUY/SELL/HOLD for each symbol.
+This is the EOD version of the 3:50-4:15pm alerts.
+"""
+
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 from datetime import datetime

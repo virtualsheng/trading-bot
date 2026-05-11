@@ -1,3 +1,5 @@
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from alpaca.data.timeframe import TimeFrame
 from core.data import get_price_data
