@@ -1,6 +1,5 @@
 # Technical Trading Bot (TQQQ/SQQQ Style)
 
-This bot replicates the core logic used by **The Stocks Channel** (Cory):
 - Morning **Opening Range Breakout (ORB)**
 - Afternoon **Momentum + EMA crossover + Trend signals**
 
@@ -43,7 +42,9 @@ technical-bot/
 **Morning Alert (ORB):**
 ```bash
 python alerts/run_orb_check.py
+```
 
 **Afternoon Alert (Technical):**
 ```bash
 python alerts/run_technical_signals.py
+```
