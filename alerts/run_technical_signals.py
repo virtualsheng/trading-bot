@@ -8,14 +8,13 @@ and prints a clear BUY/SELL/HOLD for each symbol.
 This is the EOD version of the 3:50-4:15pm alerts.
 """
 
-import os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import os
+import sys
 from dotenv import load_dotenv
 from datetime import datetime
 import pytz
 
-# Add parent directory to path for imports
+# Fix import path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from strategies.signal_engine import get_technical_signal
@@ -28,11 +27,11 @@ load_dotenv()
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_API_SECRET")
 
-SYMBOLS = ["SPY", "QQQ", "SMH", "TQQQ", "SQQQ"]
+SYMBOLS = ["SPY", "QQQ", "TQQQ", "SQQQ", "DRAM", "SMH", "SPMO", "EWT", "DBMF", "GLD", "GRID"]   # Added More Symbols
 
 def main():
     if not API_KEY or not SECRET_KEY:
-        print("❌ Missing ALPACA_API_KEY or ALPACA_SECRET_KEY in .env file")
+        print("❌ Missing ALPACA_API_KEY or ALPACA_SECRET_KEY in .env")
         return
 
     est = pytz.timezone("US/Eastern")
@@ -40,9 +39,9 @@ def main():
     
     header = f"TECHNICAL SIGNALS {now_est.strftime('%Y-%m-%d %H:%M')} ET"
 
-    print("=" * 70)
+    print("=" * 75)
     print(header)
-    print("=" * 70)
+    print("=" * 75)
 
     results = []
 
@@ -52,20 +51,20 @@ def main():
             
             action = result.get("action", "ERROR")
             rsi = result.get("rsi", "N/A")
-            bull = result.get("bull_score", "N/A")
-            bear = result.get("bear_score", "N/A")
+            bull = result.get("bull_score", "?")
+            bear = result.get("bear_score", "?")
             error = result.get("error", "")
 
             if error:
-                line = f"{symbol}: ERROR - {error[:80]}"
+                line = f"{symbol}: ❌ ERROR - {error[:60]}"
             else:
-                line = f"{symbol}: {action} | RSI={rsi} | Bull={bull} | Bear={bear}"
+                line = f"{symbol}: {action:<12} | RSI={rsi} | Bull={bull} Bear={bear}"
             
             print(line)
             results.append(line)
             
         except Exception as e:
-            error_line = f"{symbol}: ERROR - {str(e)[:80]}"
+            error_line = f"{symbol}: ❌ ERROR - {str(e)[:80]}"
             print(error_line)
             results.append(error_line)
 
@@ -74,21 +73,21 @@ def main():
     
     try:
         send_email(header, body)
-        print("✅ Email sent")
+        print("\n✅ Email sent successfully")
     except Exception as e:
-        print(f"⚠️ Email failed: {e}")
+        print(f"⚠️  Email failed: {e}")
 
     try:
         send_discord_message(body)
         print("✅ Discord message sent")
     except Exception as e:
-        print(f"⚠️ Discord failed: {e}")
+        print(f"⚠️  Discord failed: {e}")
 
     try:
         send_telegram_message(body)
         print("✅ Telegram message sent")
     except Exception as e:
-        print(f"⚠️ Telegram failed: {e}")
+        print(f"⚠️  Telegram failed: {e}")
 
 
 if __name__ == "__main__":

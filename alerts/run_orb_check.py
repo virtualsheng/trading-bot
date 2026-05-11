@@ -25,7 +25,7 @@ load_dotenv()
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_API_SECRET")
 
-SYMBOLS = ["SPY", "QQQ", "TQQQ", "SQQQ"]
+SYMBOLS = ["SPY", "QQQ", "TQQQ", "SQQQ", "DRAM", "SMH", "SPMO", "EWT", "DBMF", "GLD", "GRID"]   # Added More Symbols
 
 def main():
     if not API_KEY or not SECRET_KEY:
