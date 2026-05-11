@@ -1,4 +1,4 @@
-# Technical Trading Bot (TQQQ/SQQQ Style)
+# Technical Trading Bot (Morning / Afternoon)
 
 - Morning **Opening Range Breakout (ORB)**
 - Afternoon **Momentum + EMA crossover + Trend signals**
