@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 
 def compute_ema(series: pd.Series, period: int):
     return series.ewm(span=period, adjust=False).mean()
@@ -10,7 +9,7 @@ def compute_rsi(series: pd.Series, period: int = 14):
     loss = -delta.clip(upper=0).rolling(window=period).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return rsi.fillna(50)
 
 def compute_macd(series: pd.Series):
     ema12 = compute_ema(series, 12)

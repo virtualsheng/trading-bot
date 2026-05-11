@@ -1,12 +1,7 @@
-import os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import pandas as pd
-import numpy as np
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+import pytz
+from datetime import datetime
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-from datetime import datetime, timedelta
+from core.data import get_price_data
 
 def get_orb_signal(symbol, api_key, secret_key):
     try:
@@ -15,7 +10,7 @@ def get_orb_signal(symbol, api_key, secret_key):
             api_key=api_key,
             secret_key=secret_key,
             days=3,
-            timeframe=TimeFrame(5, TimeFrameUnit.Minute)   # Make sure this import exists
+            timeframe=TimeFrame(5, TimeFrameUnit.Minute)
         )
         
         est = pytz.timezone("US/Eastern")
@@ -23,8 +18,6 @@ def get_orb_signal(symbol, api_key, secret_key):
         today = now_est.date()
         
         df_today = df[df.index.date == today]
-        
-        print(f"Debug {symbol}: {len(df_today)} bars today (last: {df_today.index[-1] if not df_today.empty else 'None'})")
         
         if len(df_today) < 3:
             return {
@@ -39,12 +32,13 @@ def get_orb_signal(symbol, api_key, secret_key):
         opening_range = df_today.between_time("09:30", "09:45")
         
         if len(opening_range) < 3:
+            current = df_today["close"].iloc[-1] if not df_today.empty else None
             return {
                 "signal": "WAIT",
-                "current": round(float(df_today["close"].iloc[-1]), 2),
+                "current": round(float(current), 2) if current else None,
                 "or_high": None,
                 "or_low": None,
-                "reason": f"Opening range still forming ({len(opening_range)} bars)"
+                "reason": "Opening range still forming"
             }
         
         or_high = opening_range["high"].max()
@@ -77,5 +71,5 @@ def get_orb_signal(symbol, api_key, secret_key):
             "current": None,
             "or_high": None,
             "or_low": None,
-            "reason": str(e)[:100]
+            "reason": str(e)[:150]
         }

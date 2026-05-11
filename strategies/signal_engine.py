@@ -3,13 +3,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.data import get_price_data
 from core.indicators import compute_ema, compute_rsi, compute_macd
+from alpaca.data.timeframe import TimeFrame
 
 def get_technical_signal(symbol, api_key, secret_key):
     try:
-        from strategies.data import get_daily_bars
-	df = get_daily_bars(symbol, api_key, secret_key)
-        close = df["close"].dropna()
+        df = get_price_data(
+            symbol=symbol,
+            api_key=api_key,
+            secret_key=secret_key,
+            days=120,
+            timeframe=TimeFrame.Day
+        )
         
+        close = df["close"].dropna()
         if len(close) < 200:
             return {"action": "WAIT", "reason": "Not enough history"}
         
@@ -22,20 +28,25 @@ def get_technical_signal(symbol, api_key, secret_key):
         rsi = compute_rsi(close)
         _, _, hist = compute_macd(close)
         
-        latest = {
-            "ema2>ema3": ema2.iloc[-1] > ema3.iloc[-1],
-            "ema3>ema5": ema3.iloc[-1] > ema5.iloc[-1],
-            "above50": close.iloc[-1] > sma50.iloc[-1],
-            "above200": close.iloc[-1] > sma200.iloc[-1],
-            "macd_pos": hist.iloc[-1] > 0,
-            "rsi_oversold": rsi.iloc[-1] < 40,
-            "rsi_overbought": rsi.iloc[-1] > 70,
-        }
+        latest_close = close.iloc[-1]
         
-        bull_score = sum([latest["ema2>ema3"], latest["ema3>ema5"], latest["above50"], 
-                         latest["above200"], latest["macd_pos"], latest["rsi_oversold"]])
-        bear_score = sum([not latest["ema2>ema3"], not latest["ema3>ema5"], not latest["above50"],
-                         not latest["above200"], not latest["macd_pos"], latest["rsi_overbought"]])
+        bull_score = sum([
+            ema2.iloc[-1] > ema3.iloc[-1],
+            ema3.iloc[-1] > ema5.iloc[-1],
+            latest_close > sma50.iloc[-1],
+            latest_close > sma200.iloc[-1],
+            hist.iloc[-1] > 0,
+            rsi.iloc[-1] < 40
+        ])
+        
+        bear_score = sum([
+            ema2.iloc[-1] < ema3.iloc[-1],
+            ema3.iloc[-1] < ema5.iloc[-1],
+            latest_close < sma50.iloc[-1],
+            latest_close < sma200.iloc[-1],
+            hist.iloc[-1] < 0,
+            rsi.iloc[-1] > 70
+        ])
         
         if bull_score >= 5:
             action = "STRONG_BUY"

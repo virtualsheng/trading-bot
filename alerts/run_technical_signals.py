@@ -11,42 +11,85 @@ This is the EOD version of the 3:50-4:15pm alerts.
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import os
 from dotenv import load_dotenv
 from datetime import datetime
 import pytz
 
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from strategies.signal_engine import get_technical_signal
 from notifications.emailer import send_email
+from notifications.discord import send_discord_message
+from notifications.telegram import send_telegram_message
 
 load_dotenv()
 
-SYMBOLS = ["SPY", "QQQ", "TQQQ", "SQQQ"]
+API_KEY = os.getenv("ALPACA_API_KEY")
+SECRET_KEY = os.getenv("ALPACA_API_SECRET")
+
+SYMBOLS = ["SPY", "QQQ", "SMH", "TQQQ", "SQQQ"]
 
 def main():
-    api_key = os.getenv("ALPACA_API_KEY")
-    secret_key = os.getenv("ALPACA_SECRET_KEY")
-    
-    if not api_key or not secret_key:
-        print("❌ Missing Alpaca credentials in .env")
+    if not API_KEY or not SECRET_KEY:
+        print("❌ Missing ALPACA_API_KEY or ALPACA_SECRET_KEY in .env file")
         return
-    
+
     est = pytz.timezone("US/Eastern")
-    now = datetime.now(est)
+    now_est = datetime.now(est)
     
-    print("=" * 60)
-    print(f"TECHNICAL SIGNALS - {now.strftime('%Y-%m-%d %H:%M')} ET")
-    print("=" * 60)
-    
-    body = []
+    header = f"TECHNICAL SIGNALS {now_est.strftime('%Y-%m-%d %H:%M')} ET"
+
+    print("=" * 70)
+    print(header)
+    print("=" * 70)
+
+    results = []
+
     for symbol in SYMBOLS:
-        result = get_technical_signal(symbol, api_key, secret_key)
-        line = f"{symbol}: {result.get('action', 'ERROR')} | RSI: {result.get('rsi', 'N/A')}"
-        print(line)
-        body.append(line)
+        try:
+            result = get_technical_signal(symbol, API_KEY, SECRET_KEY)
+            
+            action = result.get("action", "ERROR")
+            rsi = result.get("rsi", "N/A")
+            bull = result.get("bull_score", "N/A")
+            bear = result.get("bear_score", "N/A")
+            error = result.get("error", "")
+
+            if error:
+                line = f"{symbol}: ERROR - {error[:80]}"
+            else:
+                line = f"{symbol}: {action} | RSI={rsi} | Bull={bull} | Bear={bear}"
+            
+            print(line)
+            results.append(line)
+            
+        except Exception as e:
+            error_line = f"{symbol}: ERROR - {str(e)[:80]}"
+            print(error_line)
+            results.append(error_line)
+
+    # Send notifications
+    body = "\n".join(results)
     
-    header = f"Technical Signals {now.strftime('%Y-%m-%d %H:%M')} ET"
-    send_email(header, "\n".join(body))
+    try:
+        send_email(header, body)
+        print("✅ Email sent")
+    except Exception as e:
+        print(f"⚠️ Email failed: {e}")
+
+    try:
+        send_discord_message(body)
+        print("✅ Discord message sent")
+    except Exception as e:
+        print(f"⚠️ Discord failed: {e}")
+
+    try:
+        send_telegram_message(body)
+        print("✅ Telegram message sent")
+    except Exception as e:
+        print(f"⚠️ Telegram failed: {e}")
+
 
 if __name__ == "__main__":
     main()
