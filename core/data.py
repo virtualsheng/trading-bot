@@ -88,3 +88,13 @@ def get_price_data(
         
     except Exception as e:
         raise Exception(f"Both Alpaca and yfinance failed for {symbol}: {str(e)}")
+
+def get_daily_bars(symbol: str, api_key=None, secret_key=None, days=120):
+    """Convenience function for daily data (used by signal_engine)"""
+    return get_price_data(
+        symbol=symbol,
+        api_key=api_key,
+        secret_key=secret_key,
+        days=days,
+        timeframe=TimeFrame.Day
+    )
