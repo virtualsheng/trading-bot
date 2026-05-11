@@ -26,23 +26,39 @@ load_dotenv()
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_API_SECRET")
 
-SYMBOLS = ["SPY", "QQQ", "TQQQ", "SQQQ", "DRAM", "SMH", "SPMO", "EWT", "DBMF", "GLD", "GRID"]   # Added More Symbols
+def load_symbols(filename="symbols.txt"):
+    """Load symbols from file, ignore empty lines and comments"""
+    try:
+        with open(filename, "r") as f:
+            symbols = []
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    symbols.append(line.upper())
+        return symbols
+    except FileNotFoundError:
+        print(f"⚠️  {filename} not found. Using default symbols.")
+        return ["SPY", "QQQ", "TQQQ", "SQQQ", "SMH"]
+
 
 def main():
     if not API_KEY or not SECRET_KEY:
         print("❌ Missing ALPACA_API_KEY or ALPACA_API_SECRET in .env")
         return
 
+    SYMBOLS = load_symbols()
+
     est = pytz.timezone("US/Eastern")
     now_est = datetime.now(est)
     
     header = f"TECHNICAL SIGNALS {now_est.strftime('%Y-%m-%d %H:%M')} ET"
 
-    print("=" * 75)
+    print("=" * 85)
     print(header)
-    print("=" * 75)
+    print("=" * 85)
 
     results = []
+    strong_signals = []
 
     for symbol in SYMBOLS:
         try:
@@ -55,10 +71,16 @@ def main():
             error = result.get("error", "")
 
             if error:
-                line = f"{symbol}: ❌ ERROR - {error[:80]}"
+                line = f"{symbol}: ❌ ERROR - {error[:70]}"
             else:
-                line = f"{symbol}: {action:<12} | RSI={rsi} | Bull={bull} | Bear={bear}"
-            
+                if action in ["STRONG_BUY", "STRONG_SELL"]:
+                    line = f"🔥 {symbol}: {action:<12} | RSI={rsi} | Bull={bull} | Bear={bear}"
+                    strong_signals.append(f"{symbol}: {action} (High Conviction)")
+                elif action in ["BUY", "SELL"]:
+                    line = f"📈 {symbol}: {action:<12} | RSI={rsi} | Bull={bull} | Bear={bear}"
+                else:
+                    line = f"   {symbol}: {action:<12} | RSI={rsi} | Bull={bull} | Bear={bear}"
+
             print(line)
             results.append(line)
             
@@ -67,8 +89,23 @@ def main():
             print(error_line)
             results.append(error_line)
 
-    body = "\n".join(results)
+    # === Summary & High Conviction ===
+    print("\n" + "=" * 85)
+    print("SUMMARY & HIGH CONVICTION SIGNALS")
+    print("=" * 85)
     
+    if strong_signals:
+        print("🔥 HIGH CONVICTION SIGNALS:")
+        for s in strong_signals:
+            print(f"   • {s}")
+    else:
+        print("🟡 No strong signals today. Mostly HOLD/BUY/SELL signals.")
+
+    # Send notifications
+    body = "\n".join(results)
+    if strong_signals:
+        body += "\n\nHIGH CONVICTION SIGNALS:\n" + "\n".join(strong_signals)
+
     try:
         send_email(header, body)
         print("\n✅ Email sent")
@@ -78,14 +115,11 @@ def main():
     try:
         send_discord_message(body)
         print("✅ Discord sent")
-    except Exception as e:
-        print(f"⚠️ Discord failed: {e}")
-
+    except: pass
     try:
         send_telegram_message(body)
         print("✅ Telegram sent")
-    except Exception as e:
-        print(f"⚠️ Telegram failed: {e}")
+    except: pass
 
 
 if __name__ == "__main__":

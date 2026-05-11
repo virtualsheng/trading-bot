@@ -25,26 +25,38 @@ load_dotenv()
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_API_SECRET")
 
-# Expanded symbol list
-SYMBOLS = ["SPY", "QQQ", "TQQQ", "SQQQ", "SMH", "SPMO", "EWT", "GLD", "GRID"]
+def load_symbols(filename="symbols.txt"):
+    """Load symbols from file, ignore empty lines and comments"""
+    try:
+        with open(filename, "r") as f:
+            symbols = []
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    symbols.append(line.upper())
+        return symbols
+    except FileNotFoundError:
+        print(f"⚠️  {filename} not found. Using default symbols.")
+        return ["SPY", "QQQ", "TQQQ", "SQQQ", "SMH"]
 
 def main():
     if not API_KEY or not SECRET_KEY:
         print("❌ Missing ALPACA_API_KEY or ALPACA_API_SECRET in .env")
         return
 
+    SYMBOLS = load_symbols()
+
     est = pytz.timezone("US/Eastern")
     now = datetime.now(est)
     
     header = f"ORB SIGNALS {now.strftime('%Y-%m-%d %H:%M')} ET"
 
-    print("=" * 80)
+    print("=" * 85)
     print(header)
-    print("=" * 80)
+    print("=" * 85)
 
     results = []
-    breakout_count = 0
-    high_conviction = []
+    breakouts = []
 
     for symbol in SYMBOLS:
         result = get_orb_signal(symbol, API_KEY, SECRET_KEY)
@@ -55,47 +67,39 @@ def main():
         low = result.get("or_low", "N/A")
         reason = result.get("reason", "")
 
-        # Filter low-volume / bad data
         if "insufficient data" in str(reason).lower():
             continue
 
-        # Format line with color highlighting (console)
         if sig == "BUY":
-            line = f"🚀 {symbol}: BUY     | Current={curr} | OR High={high} | OR Low={low} | {reason}"
-            breakout_count += 1
-            high_conviction.append(f"{symbol} (Bullish Breakout)")
+            line = f"🚀 {symbol}: BUY     | Current={curr} | ORH={high} | ORL={low}"
+            breakouts.append(f"🚀 {symbol} - Bullish Breakout")
         elif sig == "SELL":
-            line = f"🔻 {symbol}: SELL    | Current={curr} | OR High={high} | OR Low={low} | {reason}"
-            breakout_count += 1
-            high_conviction.append(f"{symbol} (Bearish Breakdown)")
+            line = f"🔻 {symbol}: SELL    | Current={curr} | ORH={high} | ORL={low}"
+            breakouts.append(f"🔻 {symbol} - Bearish Breakdown")
         else:
-            line = f"   {symbol}: WAIT    | Current={curr} | OR High={high} | OR Low={low} | {reason}"
+            line = f"   {symbol}: WAIT    | Current={curr} | ORH={high} | ORL={low} | Inside Range"
 
         print(line)
         results.append(line)
 
-    # === Summary & Recommendation ===
-    print("\n" + "=" * 80)
-    print("SUMMARY & RECOMMENDATION")
-    print("=" * 80)
+    # === Summary ===
+    print("\n" + "=" * 85)
+    print("SUMMARY & HIGH CONVICTION SIGNALS")
+    print("=" * 85)
     
-    if breakout_count == 0:
-        print("🟡 NO CLEAR BREAKOUT YET")
-        print("Recommendation: Wait for price to close outside the Opening Range.")
-        print("Monitor TQQQ / SQQQ closely in the next 15-30 minutes.")
-    elif breakout_count == 1:
-        print(f"🔥 ONE HIGH CONVICTION SIGNAL: {high_conviction[0]}")
-        print("Recommendation: Consider this as your primary trade.")
+    if not breakouts:
+        print("🟡 NO BREAKOUTS YET")
+        print("→ Wait for price to break and close outside the Opening Range.")
     else:
-        print(f"🔥 {breakout_count} BREAKOUTS DETECTED!")
-        print("High Conviction Symbols:")
-        for item in high_conviction:
-            print(f"   • {item}")
-        print("\nRecommendation: Focus on the strongest volume + conviction names.")
+        print("🔥 BREAKOUT SIGNALS DETECTED:")
+        for b in breakouts:
+            print(f"   {b}")
 
     # Send notifications
-    body = "\n".join(results) + "\n\n" + "="*50 + "\nSUMMARY:\n" + "\n".join(high_conviction) if high_conviction else "No breakouts"
-    
+    body = "\n".join(results)
+    if breakouts:
+        body += "\n\nHIGH CONVICTION:\n" + "\n".join(breakouts)
+
     try:
         send_email(header, body)
         print("\n✅ Email sent")
