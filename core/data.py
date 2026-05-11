@@ -13,20 +13,15 @@ def get_price_data(
     days: int = 5,
     timeframe=None
 ):
-    """
-    Try Alpaca first (with IEX), fallback to yfinance if it fails.
-    """
-    # Default timeframe
     if timeframe is None:
         timeframe = TimeFrame(5, TimeFrameUnit.Minute)
 
-    # === Try Alpaca First ===
+    # Try Alpaca first
     if api_key and secret_key:
         try:
             client = StockHistoricalDataClient(api_key, secret_key)
-            
             end = datetime.now(pytz.UTC)
-            start = end - timedelta(days=days)
+            start = end - timedelta(days=days + 2)
             
             request = StockBarsRequest(
                 symbol_or_symbols=symbol,
@@ -43,58 +38,24 @@ def get_price_data(
                 df = df[df["symbol"] == symbol].copy()
                 df = df.set_index("timestamp")
                 df.index = df.index.tz_convert("US/Eastern")
-                print(f"✅ {symbol}: Data from Alpaca IEX")
                 return df
-        except Exception as e:
-            print(f"⚠️ Alpaca failed for {symbol}, trying yfinance... ({str(e)[:80]})")
+        except:
+            pass  # fallback to yfinance
 
-    # === Fallback to yfinance ===
+    # yfinance fallback
     try:
-        # Convert timeframe for yfinance
-        interval_map = {
-            TimeFrame(5, TimeFrameUnit.Minute): "5m",
-            TimeFrame.Day: "1d",
-        }
-        interval = interval_map.get(timeframe, "5m")
-        
-        end = datetime.now(pytz.UTC)
-        start = end - timedelta(days=days + 1)
-        
-        df = yf.download(
-            symbol,
-            start=start,
-            end=end,
-            interval=interval,
-            progress=False,
-            prepost=True  # Include pre-market if available
-        )
+        interval = "5m" if timeframe == TimeFrame(5, TimeFrameUnit.Minute) else "1d"
+        df = yf.download(symbol, period=f"{days+5}d", interval=interval, progress=False, prepost=True)
         
         if df.empty:
-            raise ValueError("No data from yfinance")
-        
-        df = df.rename(columns={
-            'Open': 'open', 'High': 'high',
-            'Low': 'low', 'Close': 'close', 'Volume': 'volume'
-        })
-        
+            raise ValueError("No data")
+            
+        df = df.rename(columns={'Open':'open','High':'high','Low':'low','Close':'close','Volume':'volume'})
         df.index = pd.to_datetime(df.index)
         if df.index.tz is None:
             df.index = df.index.tz_localize("US/Eastern")
         else:
             df.index = df.index.tz_convert("US/Eastern")
-        
-        print(f"✅ {symbol}: Data from yfinance (fallback)")
         return df
-        
     except Exception as e:
-        raise Exception(f"Both Alpaca and yfinance failed for {symbol}: {str(e)}")
-
-def get_daily_bars(symbol: str, api_key=None, secret_key=None, days=120):
-    """Convenience function for daily data (used by signal_engine)"""
-    return get_price_data(
-        symbol=symbol,
-        api_key=api_key,
-        secret_key=secret_key,
-        days=days,
-        timeframe=TimeFrame.Day
-    )
+        raise Exception(f"Both sources failed for {symbol}: {str(e)}")

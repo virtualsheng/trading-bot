@@ -3,10 +3,11 @@ Technical Signal Engine - Afternoon Analysis
 Momentum + EMA crossover + trend logic
 """
 
-import warnings
-warnings.filterwarnings("ignore", category=RuntimeWarning)
 import os
 import sys
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.data import get_price_data
@@ -15,19 +16,20 @@ from alpaca.data.timeframe import TimeFrame
 
 def get_technical_signal(symbol, api_key, secret_key):
     try:
-        # Use daily bars for trend/momentum analysis
         df = get_price_data(
             symbol=symbol,
             api_key=api_key,
             secret_key=secret_key,
-            days=150,                    # Extra buffer
+            days=400,
             timeframe=TimeFrame.Day
         )
         
         close = df["close"].dropna()
-        
-        if len(close) < 200:
-            return {"action": "WAIT", "reason": "Not enough history"}
+        volume = df["volume"].dropna()
+        open_price = df["open"].dropna()
+
+        if len(close) < 120:
+            return {"action": "WAIT", "reason": f"Insufficient history ({len(close)} bars)"}
 
         ema2 = compute_ema(close, 2)
         ema3 = compute_ema(close, 3)
@@ -39,41 +41,55 @@ def get_technical_signal(symbol, api_key, secret_key):
         _, _, hist = compute_macd(close)
         
         latest_close = close.iloc[-1]
-        
+        latest_open = open_price.iloc[-1] if len(open_price) > 0 else latest_close
+        latest_rsi = rsi.iloc[-1]
+        avg_volume = volume.rolling(20).mean().iloc[-1]
+        latest_volume = volume.iloc[-1]
+
+        # Core Cory-style momentum
+        short_momentum_bull = ema2.iloc[-1] > ema3.iloc[-1] and ema3.iloc[-1] > ema5.iloc[-1]
+        short_momentum_bear = ema2.iloc[-1] < ema3.iloc[-1] and ema3.iloc[-1] < ema5.iloc[-1]
+
         bull_score = sum([
-            ema2.iloc[-1] > ema3.iloc[-1],      # Short momentum
-            ema3.iloc[-1] > ema5.iloc[-1],
+            short_momentum_bull,
             latest_close > sma50.iloc[-1],
             latest_close > sma200.iloc[-1],
             hist.iloc[-1] > 0,
-            rsi.iloc[-1] < 40
+            latest_rsi < 45,
         ])
         
         bear_score = sum([
-            ema2.iloc[-1] < ema3.iloc[-1],
-            ema3.iloc[-1] < ema5.iloc[-1],
+            short_momentum_bear,
             latest_close < sma50.iloc[-1],
             latest_close < sma200.iloc[-1],
             hist.iloc[-1] < 0,
-            rsi.iloc[-1] > 70
+            latest_rsi > 60,
         ])
-        
-        if bull_score >= 5:
+
+        pct_change_open = ((latest_close - latest_open) / latest_open * 100) if latest_open else 0
+        volume_ratio = latest_volume / avg_volume if avg_volume > 0 else 1.0
+
+        # Final Action
+        if bull_score >= 5 and latest_rsi < 68 and volume_ratio > 1.1:
             action = "STRONG_BUY"
-        elif bull_score >= 4:
+        elif bull_score >= 4 and latest_rsi < 62:
             action = "BUY"
-        elif bear_score >= 5:
+        elif bear_score >= 5 and latest_rsi > 32 and volume_ratio > 1.1:
             action = "STRONG_SELL"
-        elif bear_score >= 4:
+        elif bear_score >= 4 and latest_rsi > 38:
             action = "SELL"
         else:
             action = "HOLD"
-        
+
         return {
             "action": action,
             "bull_score": int(bull_score),
             "bear_score": int(bear_score),
-            "rsi": round(float(rsi.iloc[-1]), 2)
+            "rsi": round(float(latest_rsi), 2),
+            "rsi_interpretation": "Oversold" if latest_rsi < 35 else "Overbought" if latest_rsi > 65 else "Neutral",
+            "pct_change_open": round(pct_change_open, 2),
+            "volume_ratio": round(volume_ratio, 2),
+            "above_sma200": latest_close > sma200.iloc[-1]
         }
         
     except Exception as e:

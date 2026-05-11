@@ -27,91 +27,77 @@ API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_API_SECRET")
 
 def load_symbols(filename="symbols.txt"):
-    """Load symbols from file, ignore empty lines and comments"""
     try:
         with open(filename, "r") as f:
-            symbols = []
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    symbols.append(line.upper())
-        return symbols
+            return [line.strip().upper() for line in f if line.strip() and not line.startswith("#")]
     except FileNotFoundError:
-        print(f"⚠️  {filename} not found. Using default symbols.")
         return ["SPY", "QQQ", "TQQQ", "SQQQ", "SMH"]
 
 
 def main():
     if not API_KEY or not SECRET_KEY:
-        print("❌ Missing ALPACA_API_KEY or ALPACA_API_SECRET in .env")
+        print("❌ Missing ALPACA credentials")
         return
 
     SYMBOLS = load_symbols()
-
     est = pytz.timezone("US/Eastern")
     now_est = datetime.now(est)
     
     header = f"TECHNICAL SIGNALS {now_est.strftime('%Y-%m-%d %H:%M')} ET"
 
-    print("=" * 85)
+    print("=" * 95)
     print(header)
-    print("=" * 85)
+    print("=" * 95)
 
     results = []
-    strong_signals = []
+    high_conviction = []
 
     for symbol in SYMBOLS:
-        try:
-            result = get_technical_signal(symbol, API_KEY, SECRET_KEY)
+        result = get_technical_signal(symbol, API_KEY, SECRET_KEY)
+        
+        action = result.get("action", "ERROR")
+        rsi = result.get("rsi", "N/A")
+        bull = result.get("bull_score", "N/A")
+        bear = result.get("bear_score", "N/A")
+        pct_chg = result.get("pct_change_open", 0)
+        vol_ratio = result.get("volume_ratio", 1.0)
+        rsi_int = result.get("rsi_interpretation", "")
+
+        if action == "ERROR":
+            line = f"{symbol}: ❌ ERROR"
+        else:
+            conviction = "🔥" if (action in ["STRONG_BUY", "STRONG_SELL"] and vol_ratio > 1.3) else "📈" if action in ["BUY", "SELL"] else "   "
             
-            action = result.get("action", "ERROR")
-            rsi = result.get("rsi", "N/A")
-            bull = result.get("bull_score", "N/A")
-            bear = result.get("bear_score", "N/A")
-            error = result.get("error", "")
-
-            if error:
-                line = f"{symbol}: ❌ ERROR - {error[:70]}"
-            else:
-                if action in ["STRONG_BUY", "STRONG_SELL"]:
-                    line = f"🔥 {symbol}: {action:<12} | RSI={rsi} | Bull={bull} | Bear={bear}"
-                    strong_signals.append(f"{symbol}: {action} (High Conviction)")
-                elif action in ["BUY", "SELL"]:
-                    line = f"📈 {symbol}: {action:<12} | RSI={rsi} | Bull={bull} | Bear={bear}"
-                else:
-                    line = f"   {symbol}: {action:<12} | RSI={rsi} | Bull={bull} | Bear={bear}"
-
-            print(line)
-            results.append(line)
+            line = f"{conviction} {symbol}: {action:<12} | RSI={rsi} ({rsi_int}) | Chg={pct_chg:+.2f}% | Vol={vol_ratio:.2f}x | Bull={bull} Bear={bear}"
             
-        except Exception as e:
-            error_line = f"{symbol}: ❌ ERROR - {str(e)[:80]}"
-            print(error_line)
-            results.append(error_line)
+            if action in ["STRONG_BUY", "STRONG_SELL"] and vol_ratio > 1.3:
+                high_conviction.append(f"{symbol} → {action} (Strong Volume)")
 
-    # === Summary & High Conviction ===
-    print("\n" + "=" * 85)
-    print("SUMMARY & HIGH CONVICTION SIGNALS")
-    print("=" * 85)
+        print(line)
+        results.append(line)
+
+    # Summary
+    print("\n" + "=" * 95)
+    print("SUMMARY & RECOMMENDATION")
+    print("=" * 95)
     
-    if strong_signals:
+    if high_conviction:
         print("🔥 HIGH CONVICTION SIGNALS:")
-        for s in strong_signals:
-            print(f"   • {s}")
+        for item in high_conviction:
+            print(f"   • {item}")
+        print("\nRecommendation: Focus on these names for potential entries.")
     else:
-        print("🟡 No strong signals today. Mostly HOLD/BUY/SELL signals.")
+        print("🟡 No high conviction signals today. Market is neutral or ranging.")
 
     # Send notifications
     body = "\n".join(results)
-    if strong_signals:
-        body += "\n\nHIGH CONVICTION SIGNALS:\n" + "\n".join(strong_signals)
+    if high_conviction:
+        body += "\n\nHIGH CONVICTION:\n" + "\n".join(high_conviction)
 
     try:
         send_email(header, body)
         print("\n✅ Email sent")
-    except Exception as e:
-        print(f"⚠️ Email failed: {e}")
-
+    except: pass
     try:
         send_discord_message(body)
         print("✅ Discord sent")

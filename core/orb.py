@@ -14,62 +14,53 @@ def get_orb_signal(symbol, api_key, secret_key):
         )
         
         est = pytz.timezone("US/Eastern")
-        now_est = datetime.now(est)
-        today = now_est.date()
+        today = datetime.now(est).date()
         
         df_today = df[df.index.date == today]
         
         if len(df_today) < 3:
-            return {
-                "signal": "WAIT",
-                "current": None,
-                "or_high": None,
-                "or_low": None,
-                "reason": f"Market not open yet or insufficient data ({len(df_today)} bars)"
-            }
-        
-        # Opening Range: 9:30 - 9:45 ET
+            return {"signal": "WAIT", "reason": f"Insufficient bars ({len(df_today)})"}
+
         opening_range = df_today.between_time("09:30", "09:45")
         
         if len(opening_range) < 3:
-            current = df_today["close"].iloc[-1] if not df_today.empty else None
+            current = df_today["close"].iloc[-1]
             return {
                 "signal": "WAIT",
-                "current": round(float(current), 2) if current else None,
-                "or_high": None,
-                "or_low": None,
+                "current": round(float(current), 2),
                 "reason": "Opening range still forming"
             }
         
         or_high = opening_range["high"].max()
         or_low = opening_range["low"].min()
-        or_mid = (or_high + or_low) / 2
-        current_price = df_today["close"].iloc[-1]
+        current = df_today["close"].iloc[-1]
+        open_price = df_today["open"].iloc[0]
         
-        if current_price > or_high:
+        # Additional metrics
+        pct_change_open = ((current - open_price) / open_price * 100)
+        avg_vol = df_today["volume"].rolling(5).mean().iloc[-1] if len(df_today) > 5 else df_today["volume"].mean()
+        latest_vol = df_today["volume"].iloc[-1]
+        vol_ratio = latest_vol / avg_vol if avg_vol > 0 else 1.0
+
+        if current > or_high:
             signal = "BUY"
-            reason = "Above OR High"
-        elif current_price < or_low:
+            reason = "Breakout Above OR"
+        elif current < or_low:
             signal = "SELL"
-            reason = "Below OR Low"
+            reason = "Breakdown Below OR"
         else:
             signal = "WAIT"
             reason = "Inside OR"
-        
+
         return {
             "signal": signal,
-            "current": round(float(current_price), 2),
+            "current": round(float(current), 2),
             "or_high": round(float(or_high), 2),
             "or_low": round(float(or_low), 2),
-            "stop_loss": round(float(or_mid), 2),
+            "pct_change_open": round(float(pct_change_open), 2),
+            "volume_ratio": round(float(vol_ratio), 2),
             "reason": reason
         }
         
     except Exception as e:
-        return {
-            "signal": "ERROR",
-            "current": None,
-            "or_high": None,
-            "or_low": None,
-            "reason": str(e)[:150]
-        }
+        return {"signal": "ERROR", "reason": str(e)[:100]}

@@ -26,79 +26,80 @@ API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_API_SECRET")
 
 def load_symbols(filename="symbols.txt"):
-    """Load symbols from file, ignore empty lines and comments"""
     try:
         with open(filename, "r") as f:
-            symbols = []
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    symbols.append(line.upper())
-        return symbols
+            return [line.strip().upper() for line in f if line.strip() and not line.startswith("#")]
     except FileNotFoundError:
-        print(f"⚠️  {filename} not found. Using default symbols.")
+        print(f"⚠️ symbols.txt not found. Using defaults.")
         return ["SPY", "QQQ", "TQQQ", "SQQQ", "SMH"]
+
 
 def main():
     if not API_KEY or not SECRET_KEY:
-        print("❌ Missing ALPACA_API_KEY or ALPACA_API_SECRET in .env")
+        print("❌ Missing ALPACA credentials in .env")
         return
 
     SYMBOLS = load_symbols()
-
     est = pytz.timezone("US/Eastern")
     now = datetime.now(est)
     
     header = f"ORB SIGNALS {now.strftime('%Y-%m-%d %H:%M')} ET"
 
-    print("=" * 85)
+    print("=" * 100)
     print(header)
-    print("=" * 85)
+    print("=" * 100)
 
     results = []
-    breakouts = []
+    high_conviction = []
 
     for symbol in SYMBOLS:
         result = get_orb_signal(symbol, API_KEY, SECRET_KEY)
         
         sig = result.get("signal", "ERROR")
         curr = result.get("current", "N/A")
-        high = result.get("or_high", "N/A")
-        low = result.get("or_low", "N/A")
+        or_high = result.get("or_high", "N/A")
+        or_low = result.get("or_low", "N/A")
         reason = result.get("reason", "")
+        pct_chg = result.get("pct_change_open", 0)      # Added
+        vol_ratio = result.get("volume_ratio", 1.0)     # Added
 
         if "insufficient data" in str(reason).lower():
             continue
 
         if sig == "BUY":
-            line = f"🚀 {symbol}: BUY     | Current={curr} | ORH={high} | ORL={low}"
-            breakouts.append(f"🚀 {symbol} - Bullish Breakout")
+            conviction = "🔥" if vol_ratio > 1.5 else "🚀"
+            line = f"{conviction} {symbol}: BUY     | Current={curr} | ORH={or_high} | ORL={or_low} | Chg={pct_chg:+.2f}% | Vol={vol_ratio:.2f}x"
+            if vol_ratio > 1.4:
+                high_conviction.append(f"{symbol} → STRONG BULLISH BREAKOUT (Vol {vol_ratio:.2f}x)")
         elif sig == "SELL":
-            line = f"🔻 {symbol}: SELL    | Current={curr} | ORH={high} | ORL={low}"
-            breakouts.append(f"🔻 {symbol} - Bearish Breakdown")
+            conviction = "🔻" if vol_ratio > 1.5 else "📉"
+            line = f"{conviction} {symbol}: SELL    | Current={curr} | ORH={or_high} | ORL={or_low} | Chg={pct_chg:+.2f}% | Vol={vol_ratio:.2f}x"
+            if vol_ratio > 1.4:
+                high_conviction.append(f"{symbol} → STRONG BEARISH BREAKDOWN (Vol {vol_ratio:.2f}x)")
         else:
-            line = f"   {symbol}: WAIT    | Current={curr} | ORH={high} | ORL={low} | Inside Range"
+            line = f"   {symbol}: WAIT    | Current={curr} | ORH={or_high} | ORL={or_low} | Chg={pct_chg:+.2f}% | Inside Range"
 
         print(line)
         results.append(line)
 
-    # === Summary ===
-    print("\n" + "=" * 85)
+    # === Summary & Recommendation ===
+    print("\n" + "=" * 100)
     print("SUMMARY & HIGH CONVICTION SIGNALS")
-    print("=" * 85)
+    print("=" * 100)
     
-    if not breakouts:
-        print("🟡 NO BREAKOUTS YET")
-        print("→ Wait for price to break and close outside the Opening Range.")
+    if high_conviction:
+        print("🔥 HIGH CONVICTION BREAKOUTS:")
+        for item in high_conviction:
+            print(f"   • {item}")
+        print("\nRecommendation: Prioritize these names. Strong volume + clean breakout = highest probability.")
     else:
-        print("🔥 BREAKOUT SIGNALS DETECTED:")
-        for b in breakouts:
-            print(f"   {b}")
+        print("🟡 NO CLEAR BREAKOUTS YET")
+        print("Recommendation: Wait for a decisive 5-min close outside the Opening Range.")
 
     # Send notifications
     body = "\n".join(results)
-    if breakouts:
-        body += "\n\nHIGH CONVICTION:\n" + "\n".join(breakouts)
+    if high_conviction:
+        body += "\n\nHIGH CONVICTION BREAKOUTS:\n" + "\n".join(high_conviction)
 
     try:
         send_email(header, body)
