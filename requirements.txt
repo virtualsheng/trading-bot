@@ -1,0 +1,8 @@
+lumibot>=3.0.0
+pandas
+numpy
+python-dotenv
+alpaca-trade-api
+alpaca-py
+yfinance
+pandas-ta
