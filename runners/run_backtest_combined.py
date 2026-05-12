@@ -142,6 +142,7 @@ if __name__ == "__main__":
 
     pandas_data = build_pandas_data(TICKERS, START, END)
 
+    pd.options.mode.chained_assignment = None
     print("\n🚀 Starting Backtest...")
     ORBStrategy.run_backtest(
         datasource_class=PandasDataBacktesting,

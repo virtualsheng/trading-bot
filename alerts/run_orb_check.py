@@ -30,13 +30,16 @@ def load_symbols(filename="symbols.txt"):
         with open(filename, "r") as f:
             return [line.strip().upper() for line in f if line.strip() and not line.startswith("#")]
     except FileNotFoundError:
-        print(f"⚠️ symbols.txt not found. Using defaults.")
         return ["SPY", "QQQ", "TQQQ", "SQQQ", "SMH"]
 
+def log_signal(signal_type, content):
+    os.makedirs("logs", exist_ok=True)
+    with open("logs/daily_signals.log", "a") as f:
+        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {signal_type} | {content}\n")
 
 def main():
     if not API_KEY or not SECRET_KEY:
-        print("❌ Missing ALPACA credentials in .env")
+        print("❌ Missing ALPACA credentials")
         return
 
     SYMBOLS = load_symbols()
@@ -81,6 +84,8 @@ def main():
 
         print(line)
         results.append(line)
+
+    log_signal("ORB", "\n".join(results))
 
     # === Summary & Recommendation ===
     print("\n" + "=" * 100)

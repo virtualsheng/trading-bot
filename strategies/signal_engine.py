@@ -13,6 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.data import get_price_data
 from core.indicators import compute_ema, compute_rsi, compute_macd
 from alpaca.data.timeframe import TimeFrame
+import pandas as pd
+from datetime import datetime
 
 def get_technical_signal(symbol, api_key, secret_key):
     try:
@@ -46,30 +48,17 @@ def get_technical_signal(symbol, api_key, secret_key):
         avg_volume = volume.rolling(20).mean().iloc[-1]
         latest_volume = volume.iloc[-1]
 
-        # Core Cory-style momentum
-        short_momentum_bull = ema2.iloc[-1] > ema3.iloc[-1] and ema3.iloc[-1] > ema5.iloc[-1]
-        short_momentum_bear = ema2.iloc[-1] < ema3.iloc[-1] and ema3.iloc[-1] < ema5.iloc[-1]
+        short_momentum_bull = (ema2.iloc[-1] > ema3.iloc[-1]) and (ema3.iloc[-1] > ema5.iloc[-1])
+        short_momentum_bear = (ema2.iloc[-1] < ema3.iloc[-1]) and (ema3.iloc[-1] < ema5.iloc[-1])
 
-        bull_score = sum([
-            short_momentum_bull,
-            latest_close > sma50.iloc[-1],
-            latest_close > sma200.iloc[-1],
-            hist.iloc[-1] > 0,
-            latest_rsi < 45,
-        ])
-        
-        bear_score = sum([
-            short_momentum_bear,
-            latest_close < sma50.iloc[-1],
-            latest_close < sma200.iloc[-1],
-            hist.iloc[-1] < 0,
-            latest_rsi > 60,
-        ])
+        bull_score = sum([short_momentum_bull, latest_close > sma50.iloc[-1], 
+                         latest_close > sma200.iloc[-1], hist.iloc[-1] > 0, latest_rsi < 45])
+        bear_score = sum([short_momentum_bear, latest_close < sma50.iloc[-1], 
+                         latest_close < sma200.iloc[-1], hist.iloc[-1] < 0, latest_rsi > 60])
 
         pct_change_open = ((latest_close - latest_open) / latest_open * 100) if latest_open else 0
         volume_ratio = latest_volume / avg_volume if avg_volume > 0 else 1.0
 
-        # Final Action
         if bull_score >= 5 and latest_rsi < 68 and volume_ratio > 1.1:
             action = "STRONG_BUY"
         elif bull_score >= 4 and latest_rsi < 62:
@@ -80,6 +69,14 @@ def get_technical_signal(symbol, api_key, secret_key):
             action = "SELL"
         else:
             action = "HOLD"
+
+        # Log daily signal
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = f"{log_dir}/daily_signals.log"
+        
+        with open(log_file, "a") as f:
+            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M')} | {symbol} | {action} | RSI={round(latest_rsi,2)} | Bull={bull_score} Bear={bear_score}\n")
 
         return {
             "action": action,
