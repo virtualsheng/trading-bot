@@ -1,10 +1,14 @@
 """
 Morning ORB (Opening Range Breakout) check.
-Run via cron at 9:45am EST on weekdays:
+Run via cron at 9:56am EST on weekdays:
   45 9 * * 1-5 python alerts/run_orb_check.py
 
 Checks if QQQ has broken above or below its first 15-min range.
 This is the morning version of the 9:15-9:45am alerts.
+"""
+
+"""
+Morning ORB Check
 """
 
 import os
@@ -32,10 +36,16 @@ def load_symbols(filename="symbols.txt"):
     except FileNotFoundError:
         return ["SPY", "QQQ", "TQQQ", "SQQQ", "SMH"]
 
-def log_signal(signal_type, content):
+
+def log_signal(signal_type: str, content: str):
+    """Safe logging with UTF-8 encoding"""
     os.makedirs("logs", exist_ok=True)
-    with open("logs/daily_signals.log", "a") as f:
-        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {signal_type} | {content}\n")
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    log_line = f"{timestamp} | {signal_type} | {content}\n"
+    
+    with open("logs/daily_signals.log", "a", encoding="utf-8") as f:
+        f.write(log_line)
+
 
 def main():
     if not API_KEY or not SECRET_KEY:
@@ -48,9 +58,9 @@ def main():
     
     header = f"ORB SIGNALS {now.strftime('%Y-%m-%d %H:%M')} ET"
 
-    print("=" * 100)
+    print("=" * 110)
     print(header)
-    print("=" * 100)
+    print("=" * 110)
 
     results = []
     high_conviction = []
@@ -62,62 +72,51 @@ def main():
         curr = result.get("current", "N/A")
         or_high = result.get("or_high", "N/A")
         or_low = result.get("or_low", "N/A")
+        pct_chg = result.get("pct_change_open", 0)
+        vol_ratio = result.get("volume_ratio", 1.0)
         reason = result.get("reason", "")
-        pct_chg = result.get("pct_change_open", 0)      # Added
-        vol_ratio = result.get("volume_ratio", 1.0)     # Added
 
-        if "insufficient data" in str(reason).lower():
+        if "insufficient" in str(reason).lower():
             continue
 
         if sig == "BUY":
             conviction = "🔥" if vol_ratio > 1.5 else "🚀"
-            line = f"{conviction} {symbol}: BUY     | Current={curr} | ORH={or_high} | ORL={or_low} | Chg={pct_chg:+.2f}% | Vol={vol_ratio:.2f}x"
+            line = f"{conviction} {symbol}: BUY     | Current={curr} | ORH={or_high} | Chg={pct_chg:+.2f}% | Vol={vol_ratio:.2f}x"
             if vol_ratio > 1.4:
-                high_conviction.append(f"{symbol} → STRONG BULLISH BREAKOUT (Vol {vol_ratio:.2f}x)")
+                high_conviction.append(f"{symbol} → STRONG BULLISH BREAKOUT")
         elif sig == "SELL":
             conviction = "🔻" if vol_ratio > 1.5 else "📉"
-            line = f"{conviction} {symbol}: SELL    | Current={curr} | ORH={or_high} | ORL={or_low} | Chg={pct_chg:+.2f}% | Vol={vol_ratio:.2f}x"
+            line = f"{conviction} {symbol}: SELL    | Current={curr} | ORH={or_high} | Chg={pct_chg:+.2f}% | Vol={vol_ratio:.2f}x"
             if vol_ratio > 1.4:
-                high_conviction.append(f"{symbol} → STRONG BEARISH BREAKDOWN (Vol {vol_ratio:.2f}x)")
+                high_conviction.append(f"{symbol} → STRONG BEARISH BREAKDOWN")
         else:
-            line = f"   {symbol}: WAIT    | Current={curr} | ORH={or_high} | ORL={or_low} | Chg={pct_chg:+.2f}% | Inside Range"
+            line = f"   {symbol}: WAIT    | Current={curr} | ORH={or_high} | Chg={pct_chg:+.2f}% | Inside Range"
 
         print(line)
         results.append(line)
 
     log_signal("ORB", "\n".join(results))
 
-    # === Summary & Recommendation ===
-    print("\n" + "=" * 100)
-    print("SUMMARY & HIGH CONVICTION SIGNALS")
-    print("=" * 100)
-    
+    print("\n" + "=" * 110)
+    print("SUMMARY & RECOMMENDATION")
+    print("=" * 110)
     if high_conviction:
         print("🔥 HIGH CONVICTION BREAKOUTS:")
         for item in high_conviction:
             print(f"   • {item}")
-        print("\nRecommendation: Prioritize these names. Strong volume + clean breakout = highest probability.")
     else:
-        print("🟡 NO CLEAR BREAKOUTS YET")
-        print("Recommendation: Wait for a decisive 5-min close outside the Opening Range.")
+        print("🟡 No breakouts yet. Monitor for decisive move outside the Opening Range.")
 
-    # Send notifications
     body = "\n".join(results)
     if high_conviction:
-        body += "\n\nHIGH CONVICTION BREAKOUTS:\n" + "\n".join(high_conviction)
+        body += "\n\nHIGH CONVICTION:\n" + "\n".join(high_conviction)
 
     try:
         send_email(header, body)
-        print("\n✅ Email sent")
-    except: pass
-    try:
         send_discord_message(body)
-        print("✅ Discord sent")
-    except: pass
-    try:
         send_telegram_message(body)
-        print("✅ Telegram sent")
-    except: pass
+    except Exception as e:
+        print(f"Notification error: {e}")
 
 
 if __name__ == "__main__":
