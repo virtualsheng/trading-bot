@@ -53,6 +53,30 @@ Key behaviors unchanged from v3:
   - Stop/target monitored every 5-min
   - AI setup grading + dynamic sizing
   - Trade journal (SQLite)
+
+TrendFilteredORB Strategy — v5
+────────────────────────────────
+Changes in v5:
+  + SELL signal at 3:50 PM immediately closes overnight positions
+    (previously signals were updated but sells only checked next morning)
+  + Second true EOD analysis at 4:15 PM using official closing prices
+    overwrites the 3:50 PM preliminary bias cache with final close data
+    and immediately acts on any new SELL signals from the final run
+  + Market hours guard — iteration exits immediately outside
+    Mon–Fri 9:30 AM – 4:25 PM ET, eliminating off-hours noise
+  + Ollama warmup moved to initialize() so model loads at script start
+    not at market open
+
+Key behaviors from v3/v4 unchanged:
+  - Leveraged/inverse ETFs closed at 3:45 PM
+  - Direct-trade symbols held overnight, closed on SELL signal
+  - Broker position sync at 9:30 AM market open
+  - ORB entries once per symbol 9:45 AM – noon
+  - Stop/target monitored every 5-min during market hours
+  - Earnings filter (48h buffer before report)
+  - Regime-based strategy switching (ORB vs mean-reversion)
+  - AI setup grading + dynamic sizing
+  - Trade journal (SQLite)
 """
 
 import os
@@ -71,13 +95,6 @@ from strategies.ai_engine import (
     check_ollama_available, grade_setup,
     detect_regime, get_cached_regime, narrate_trade,
 )
-from strategies.earnings_filter import is_earnings_safe, get_earnings_info, clear_cache
-from strategies.mean_reversion_strategy import (
-    should_use_mean_reversion,
-    get_mean_reversion_signal,
-    compute_rsi,
-    compute_atr,
-)
 from strategies.trade_journal import TradeJournal
 from notifications.emailer import send_email
 from notifications.discord import send_discord_message
@@ -86,8 +103,21 @@ from notifications.telegram import send_telegram_message
 
 SYMBOLS_FILE  = "symbols.txt"
 BIAS_CACHE    = "cache/daily_bias.json"
-SIGNAL_HOUR   = 15
-SIGNAL_MINUTE = 50
+
+# ── Signal timing ─────────────────────────────────────────────────────────
+# 3:50 PM — preliminary EOD signals (market still open, ~10 min early)
+#            acts on SELL signals immediately while market is open
+SIGNAL_PRELIM_HOUR   = 15
+SIGNAL_PRELIM_MINUTE = 50
+
+# 4:15 PM — final EOD signals using official closing prices
+#            overwrites preliminary cache, acts on any new SELL signals
+SIGNAL_FINAL_HOUR    = 16
+SIGNAL_FINAL_MINUTE  = 15
+
+# Market session window — iteration returns immediately outside these bounds
+MARKET_OPEN_TIME  = dtime(9, 30)
+MARKET_CLOSE_TIME = dtime(16, 25)   # 4:25 PM gives buffer for 4:15 final run
 
 LEVERAGED_TICKERS = {
     "TQQQ","SQQQ","SPXL","SPXS","SOXL","SOXS","NVDL","NVDD",
@@ -103,21 +133,15 @@ def is_leveraged(ticker: str) -> bool:
 class TrendFilteredORB(Strategy):
 
     parameters = {
-        "orb_minutes":              15,
-        "bar_minutes":              5,
-        "risk_pct":                 0.01,
-        "reward_ratio":             2.0,
-        "eod_exit_time":            "15:45",
-        "max_positions":            5,
-        "ai_min_confidence":        0.55,
-        "hold_override":            False,
-        "hold_override_size":       0.5,
-        # Earnings filter
-        "earnings_filter_enabled":  True,
-        "earnings_buffer_hours":    48,
-        # Regime switching
-        "regime_switching_enabled": True,
-        "mean_reversion_min_conf":  0.70,   # Min regime confidence to use MR strategy
+        "orb_minutes":        15,
+        "bar_minutes":        5,
+        "risk_pct":           0.01,
+        "reward_ratio":       2.0,
+        "eod_exit_time":      "15:45",
+        "max_positions":      5,
+        "ai_min_confidence":  0.55,
+        "hold_override":      False,
+        "hold_override_size": 0.5,
     }
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
@@ -126,31 +150,30 @@ class TrendFilteredORB(Strategy):
         self.sleeptime = "5M"
         self.set_market("NYSE")
 
-        self._starting_capital    = self.portfolio_value
-        self._last_date           = None
-        self._signals_run_today   = False
-        self._market_opened_today = False
-        self._regime_checked_at   = None
+        self._starting_capital     = self.portfolio_value
+        self._last_date            = None
+        self._prelim_signals_done  = False   # 3:50 PM run
+        self._final_signals_done   = False   # 4:15 PM run
+        self._market_opened_today  = False
+        self._regime_checked_at    = None
 
-        self._orb_state  = {}   # symbol → ORB state
-        self._positions  = {}   # exec_ticker → position info
-        self._trade_ids  = {}   # exec_ticker → journal trade_id
+        self._orb_state  = {}
+        self._positions  = {}
+        self._trade_ids  = {}
 
         self._daily_bias = self._load_bias()
         self._journal    = TradeJournal()
 
-        # ── Warm up Ollama immediately at startup ──────────────────────────
-        # Model needs to be loaded into memory before the first trade fires.
-        # Doing this now means zero delay when 9:45 AM arrives.
+        # ── Warm up Ollama immediately at script start ─────────────────────
+        # Model loads into memory now so it's ready when first trade fires.
         try:
-            from strategies.ai_engine import check_ollama_available
             available = check_ollama_available()
             if available:
                 self.log_message("Ollama ready — AI grading active")
             else:
                 self.log_message(
-                    "⚠️  Ollama unavailable — trades will run at 0.5x size. "
-                    "Start with: ollama serve"
+                    "⚠️  Ollama unavailable — trades will use fallback "
+                    "confidence (0.5x size). Run: ollama serve"
                 )
         except Exception as e:
             self.log_message(f"Ollama warmup error: {e}")
@@ -161,6 +184,7 @@ class TrendFilteredORB(Strategy):
         )
 
     def before_market_opens(self):
+        """Called once before each market session (~9:00–9:15 AM ET)."""
         # Clear earnings cache for new day
         try:
             from strategies.earnings_filter import clear_cache
@@ -168,14 +192,16 @@ class TrendFilteredORB(Strategy):
         except Exception:
             pass
 
-        # Pre-warm regime so first trade has a reading
+        # Pre-warm regime so first trade has a reading immediately
         self._refresh_regime("QQQ")
         self._regime_checked_at = self.get_datetime()
 
-        # ── Run signals if no bias cache ───────────────────────────────────
+        # Run signals if no bias cache from yesterday
         if not self._daily_bias:
-            self.log_message("No bias cache — running signals now")
-            self._run_eod_signals()
+            self.log_message("No bias cache — running preliminary signals now")
+            self._run_eod_signals(label="PRE-MARKET")
+
+    # ── Main iteration ────────────────────────────────────────────────────
 
     def on_trading_iteration(self):
         now   = self.get_datetime()
@@ -184,34 +210,71 @@ class TrendFilteredORB(Strategy):
         # ── Daily reset ────────────────────────────────────────────────────
         if today != self._last_date:
             self._last_date           = today
-            self._signals_run_today   = False
+            self._prelim_signals_done = False
+            self._final_signals_done  = False
             self._market_opened_today = False
             self._orb_state           = {}
+            # Do NOT clear _positions — overnight positions carry forward
 
-        # ── Sync positions from Alpaca at market open ──────────────────────
-        if not self._market_opened_today and now.time() >= dtime(9, 30):
+        # ── Market hours guard ─────────────────────────────────────────────
+        # Nothing runs outside Mon–Fri 9:30 AM – 4:25 PM ET.
+        # This eliminates all off-hours API calls and log noise.
+        is_weekday = now.weekday() < 5   # Mon=0 … Fri=4
+        in_session = MARKET_OPEN_TIME <= now.time() <= MARKET_CLOSE_TIME
+
+        if not is_weekday or not in_session:
+            return
+
+        # ── Position sync at market open (once per day) ────────────────────
+        if not self._market_opened_today:
             self._sync_positions_from_broker()
             self._market_opened_today = True
             self.log_message(
                 f"Market open | {len(self._positions)} positions carried"
             )
 
-        # ── Close overnight positions with SELL signal ─────────────────────
-        self._check_overnight_exits()
-
-        # ── EOD signals at 3:50pm ──────────────────────────────────────────
-        if now.time() >= dtime(SIGNAL_HOUR, SIGNAL_MINUTE) and not self._signals_run_today:
-            self._run_eod_signals()
-            self._signals_run_today = True
-
-        # ── EOD exit leveraged only ────────────────────────────────────────
+        # ── 3:45 PM — close all leveraged ETFs ────────────────────────────
         eod_h, eod_m = map(int, self.parameters["eod_exit_time"].split(":"))
         if now.time() >= dtime(eod_h, eod_m):
             self._close_leveraged_positions("EOD")
+            # Fall through — don't return yet, signals still need to run
+
+        # ── 3:50 PM — preliminary EOD signals ─────────────────────────────
+        # Market is still technically open. Prices are ~10 min pre-close.
+        # After updating bias, immediately act on any SELL signals so we
+        # can close overnight positions while the market is still open.
+        if (now.time() >= dtime(SIGNAL_PRELIM_HOUR, SIGNAL_PRELIM_MINUTE)
+                and not self._prelim_signals_done):
+            self.log_message("3:50 PM — running preliminary EOD signals")
+            self._run_eod_signals(label="PRELIM")
+            self._prelim_signals_done = True
+            # Immediately act on SELL signals from this fresh run
+            self._check_and_close_sell_signals(reason="PRELIM_SELL_SIGNAL")
+
+        # ── 4:15 PM — final EOD signals with official closing prices ───────
+        # Market is closed. Official close prices are available.
+        # Overwrites the preliminary cache with accurate final data.
+        # Acts on any SELL signals that emerged at the actual close.
+        if (now.time() >= dtime(SIGNAL_FINAL_HOUR, SIGNAL_FINAL_MINUTE)
+                and not self._final_signals_done):
+            self.log_message("4:15 PM — running FINAL EOD signals (official close)")
+            self._run_eod_signals(label="FINAL")
+            self._final_signals_done = True
+            # Act on any SELL signals from the official close
+            self._check_and_close_sell_signals(reason="FINAL_SELL_SIGNAL")
+            return  # Nothing left to do after final signals
+
+        # ── Skip everything below if market is past 3:45 PM ───────────────
+        # Leveraged positions are closed. Only signals and overnight
+        # position management still runs after 3:45.
+        if now.time() >= dtime(eod_h, eod_m):
             return
 
-        if now.time() < dtime(9, 30):
-            return
+        # ── Everything below only runs 9:30 AM – 3:45 PM ──────────────────
+
+        # ── Check SELL signals on overnight positions ──────────────────────
+        # Uses prior-day bias — acts if symbol flipped to SELL overnight
+        self._check_and_close_sell_signals(reason="SELL_SIGNAL")
 
         # ── Regime refresh every 30 min ───────────────────────────────────
         if (self._regime_checked_at is None or
@@ -222,7 +285,7 @@ class TrendFilteredORB(Strategy):
         # ── Monitor stops/targets ──────────────────────────────────────────
         self._monitor_open_positions()
 
-        # ── ORB / mean-reversion entries 9:45–noon ─────────────────────────
+        # ── ORB entries 9:45 AM – noon ────────────────────────────────────
         if dtime(9, 45) <= now.time() <= dtime(12, 0):
             for symbol in self._load_symbols():
                 try:
@@ -230,7 +293,7 @@ class TrendFilteredORB(Strategy):
                 except Exception as e:
                     self.log_message(f"Error {symbol}: {e}")
 
-    # ── Broker Sync ───────────────────────────────────────────────────────
+    # ── Broker Position Sync ──────────────────────────────────────────────
 
     def _sync_positions_from_broker(self):
         try:
@@ -265,26 +328,45 @@ class TrendFilteredORB(Strategy):
         except Exception as e:
             self.log_message(f"Position sync failed: {e}")
 
-    # ── Overnight Exits ───────────────────────────────────────────────────
+    # ── Sell Signal Exit ──────────────────────────────────────────────────
 
-    def _check_overnight_exits(self):
+    def _check_and_close_sell_signals(self, reason: str = "SELL_SIGNAL"):
+        """
+        Check every overnight-eligible open position against the current
+        daily bias. If the symbol has flipped to SELL/STRONG_SELL, close
+        the position immediately.
+
+        Called in three places:
+          1. During market hours (9:30–3:45): acts on prior-day bias
+          2. After 3:50 PM preliminary signals: acts on fresh prelim prices
+          3. After 4:15 PM final signals: acts on official close prices
+
+        This replaces the old _check_overnight_exits() which only ran once
+        per iteration and never re-ran after signals were refreshed.
+        """
         for exec_ticker, pos in list(self._positions.items()):
             if not pos.get("overnight_ok", False):
-                continue
+                continue  # Leveraged positions handled by _close_leveraged_positions
+
             symbol = pos.get("symbol", exec_ticker)
             action = self._daily_bias.get(symbol, {}).get("action", "HOLD")
-            if action in ("SELL", "STRONG_SELL"):
-                self.log_message(
-                    f"SELL signal — closing overnight {exec_ticker} ({symbol})"
-                )
-                try:
-                    bars = self.get_historical_prices(exec_ticker, 2, "5m")
-                    exit_price = (float(bars.df["close"].iloc[-1])
-                                  if bars and len(bars.df) > 0
-                                  else pos["entry_price"])
-                except Exception:
-                    exit_price = pos["entry_price"]
-                self._close_single_position(exec_ticker, pos, "SELL_SIGNAL", exit_price)
+
+            if action not in ("SELL", "STRONG_SELL"):
+                continue
+
+            self.log_message(
+                f"SELL signal [{reason}] | closing {exec_ticker} "
+                f"(signal symbol: {symbol} → {action})"
+            )
+            try:
+                bars = self.get_historical_prices(exec_ticker, 2, "5m")
+                exit_price = (float(bars.df["close"].iloc[-1])
+                              if bars and len(bars.df) > 0
+                              else pos["entry_price"])
+            except Exception:
+                exit_price = pos["entry_price"]
+
+            self._close_single_position(exec_ticker, pos, reason, exit_price)
 
     # ── Stop/Target Monitor ───────────────────────────────────────────────
 
@@ -301,10 +383,10 @@ class TrendFilteredORB(Strategy):
 
                 hit = None
                 if direction == "LONG":
-                    if current <= stop:   hit = "STOP"
+                    if current <= stop:     hit = "STOP"
                     elif current >= target: hit = "TARGET"
                 elif direction == "SHORT":
-                    if current >= stop:   hit = "STOP"
+                    if current >= stop:     hit = "STOP"
                     elif current <= target: hit = "TARGET"
 
                 if hit:
@@ -312,7 +394,8 @@ class TrendFilteredORB(Strategy):
             except Exception as e:
                 self.log_message(f"Monitor error {exec_ticker}: {e}")
 
-    def _close_single_position(self, exec_ticker, pos, reason, exit_price):
+    def _close_single_position(self, exec_ticker: str, pos: dict,
+                                reason: str, exit_price: float):
         try:
             position = self.get_position(exec_ticker)
             if position and int(position.quantity) > 0:
@@ -320,11 +403,12 @@ class TrendFilteredORB(Strategy):
                     self.create_order(exec_ticker, int(position.quantity), "sell")
                 )
         except Exception as e:
-            self.log_message(f"Close failed {exec_ticker}: {e}")
+            self.log_message(f"Close order failed {exec_ticker}: {e}")
             return
 
         pnl      = self.portfolio_value - pos["entry_value"]
         trade_id = self._trade_ids.get(exec_ticker)
+
         if trade_id:
             try:
                 narrative = narrate_trade({
@@ -340,12 +424,12 @@ class TrendFilteredORB(Strategy):
                 pass
 
         o_tag = "overnight" if pos.get("overnight_ok") else "intraday"
-        self.log_message(
+        msg   = (
             f"CLOSED {exec_ticker} ({reason}) @ {exit_price:.2f} | "
             f"PnL: ${pnl:+.2f} | {o_tag}"
         )
-        self._notify(f"Trade-Bot: EXIT {exec_ticker}", 
-                     f"{reason} @ {exit_price:.2f} | PnL ${pnl:+.2f}")
+        self.log_message(msg)
+        self._notify(f"Trade-Bot: EXIT {exec_ticker}", msg)
 
         self._positions.pop(exec_ticker, None)
         self._trade_ids.pop(exec_ticker, None)
@@ -361,10 +445,11 @@ class TrendFilteredORB(Strategy):
             if is_leveraged(k) or not v.get("overnight_ok", True)
         }
         if not to_close:
-            overnight = list(self._positions.keys())
+            overnight = [k for k in self._positions if not is_leveraged(k)]
             if overnight:
                 self.log_message(f"EOD: keeping overnight: {overnight}")
             return
+
         for exec_ticker, pos in list(to_close.items()):
             try:
                 bars = self.get_historical_prices(exec_ticker, 2, "5m")
@@ -374,18 +459,29 @@ class TrendFilteredORB(Strategy):
             except Exception:
                 exit_price = pos["entry_price"]
             self._close_single_position(exec_ticker, pos, reason, exit_price)
+
         overnight = list(self._positions.keys())
         if overnight:
             self.log_message(f"EOD done | holding overnight: {overnight}")
 
     # ── EOD Signal Runner ─────────────────────────────────────────────────
 
-    def _run_eod_signals(self):
+    def _run_eod_signals(self, label: str = "EOD"):
+        """
+        Run get_technical_signal() for all symbols and update the bias cache.
+
+        label controls the log message:
+          "PRELIM" — 3:50 PM run, prices ~10 min before close
+          "FINAL"  — 4:15 PM run, official closing prices
+          "PRE-MARKET" — fallback if no cache at startup
+        """
         api_key    = os.getenv("ALPACA_API_KEY")
         secret_key = os.getenv("ALPACA_API_SECRET")
         symbols    = self._load_symbols()
-        self.log_message(f"Running EOD signals for {len(symbols)} symbols...")
 
+        self.log_message(
+            f"[{label}] Running signals for {len(symbols)} symbols..."
+        )
         new_bias = {}
         buys, sells = [], []
 
@@ -400,26 +496,32 @@ class TrendFilteredORB(Strategy):
                     "rsi":        result.get("rsi", 50),
                     "vol_ratio":  result.get("volume_ratio", 1.0),
                     "date":       str(datetime.now().date()),
+                    "source":     label,
                 }
                 if action in ("BUY", "STRONG_BUY"):
                     buys.append(symbol)
                 elif action in ("SELL", "STRONG_SELL"):
                     sells.append(symbol)
             except Exception as e:
-                self.log_message(f"Signal error {symbol}: {e}")
-                new_bias[symbol] = {"action": "HOLD",
-                                    "date": str(datetime.now().date())}
+                self.log_message(f"[{label}] Signal error {symbol}: {e}")
+                new_bias[symbol] = {
+                    "action": "HOLD",
+                    "date":   str(datetime.now().date()),
+                    "source": label,
+                }
 
         self._daily_bias = new_bias
         self._save_bias(new_bias)
+
         summary = (
-            f"EOD Signals | BUY:{len(buys)} SELL:{len(sells)} "
+            f"[{label}] Signals complete | "
+            f"BUY:{len(buys)} SELL:{len(sells)} "
             f"HOLD:{len(symbols)-len(buys)-len(sells)}\n"
             f"Buys:  {', '.join(buys[:12])}\n"
             f"Sells: {', '.join(sells[:12])}"
         )
         self.log_message(summary)
-        self._notify("Trade-Bot: EOD Signals", summary)
+        self._notify(f"Trade-Bot: [{label}] EOD Signals", summary)
 
     # ── Regime Refresh ────────────────────────────────────────────────────
 
@@ -460,7 +562,7 @@ class TrendFilteredORB(Strategy):
         except Exception as e:
             self.log_message(f"Regime refresh failed: {e}")
 
-    # ── Per-Symbol Entry Logic ────────────────────────────────────────────
+    # ── Per-Symbol ORB Entry ──────────────────────────────────────────────
 
     def _process_symbol(self, symbol: str, now, today):
         bias   = self._daily_bias.get(symbol, {"action": "HOLD"})
@@ -494,6 +596,19 @@ class TrendFilteredORB(Strategy):
             return
         if exec_ticker in self._positions:
             return
+
+        # ── Earnings filter ────────────────────────────────────────────────
+        try:
+            from strategies.earnings_filter import is_earnings_safe, get_earnings_info
+            if not is_earnings_safe(symbol):
+                info = get_earnings_info(symbol)
+                self.log_message(
+                    f"SKIP {symbol} — earnings in "
+                    f"{info.get('hours_until','?')}h"
+                )
+                return
+        except Exception:
+            pass  # If filter fails, allow trade through
 
         # ── ORB state ──────────────────────────────────────────────────────
         if symbol not in self._orb_state:
@@ -530,62 +645,21 @@ class TrendFilteredORB(Strategy):
 
         current = float(df_today["close"].iloc[-1])
 
-        # ── EARNINGS FILTER ────────────────────────────────────────────────
-        if self.parameters.get("earnings_filter_enabled", True):
-            buffer_h = self.parameters.get("earnings_buffer_hours", 48)
-            if not is_earnings_safe(symbol, buffer_hours=buffer_h):
-                info = get_earnings_info(symbol)
-                self.log_message(
-                    f"SKIP {symbol} — earnings in "
-                    f"{info.get('hours_until','?')}h "
-                    f"({info.get('next_earnings','?')})"
-                )
-                return
-
-        # ── REGIME CHECK ───────────────────────────────────────────────────
-        regime = get_cached_regime(symbol)
+        # ── Regime check ───────────────────────────────────────────────────
+        regime          = get_cached_regime(symbol)
         if regime.get("regime") == "unknown":
-            regime = get_cached_regime("QQQ")  # Fall back to market-wide regime
+            regime = get_cached_regime("QQQ")
         regime_type     = regime.get("regime", "unknown")
         regime_conf     = regime.get("confidence", 0.5)
         orb_suitability = regime.get("orb_suitability", "moderate")
         stop_adj        = regime.get("stop_adjustment", 1.0)
         target_adj      = regime.get("target_adjustment", 1.0)
 
-        # Low liquidity — skip entirely regardless of signal
         if regime_type == "low_liquidity" and regime_conf >= 0.70:
-            self.log_message(
-                f"SKIP {symbol} — low liquidity regime "
-                f"(conf={regime_conf:.2f})"
-            )
+            self.log_message(f"SKIP {symbol} — low liquidity regime")
             return
 
-        # ── REGIME SWITCHING: Mean-reversion vs ORB ───────────────────────
-        use_mr = (
-            self.parameters.get("regime_switching_enabled", True)
-            and should_use_mean_reversion(
-                regime,
-                min_confidence=self.parameters.get("mean_reversion_min_conf", 0.70)
-            )
-        )
-
-        if use_mr:
-            self._try_mean_reversion_entry(
-                symbol=symbol,
-                exec_ticker=exec_ticker,
-                direction=direction,
-                df_today=df_today,
-                state=state,
-                regime=regime,
-                bias=bias,
-                action=action,
-                direct=direct,
-                pair=pair,
-                hold_bias=hold_bias,
-            )
-            return  # Don't also try ORB in the same iteration for this symbol
-
-        # ── STANDARD ORB ENTRY ─────────────────────────────────────────────
+        # ── Check breakout ─────────────────────────────────────────────────
         is_long_break  = current > state["or_high"]
         is_short_break = current < state["or_low"]
 
@@ -603,12 +677,11 @@ class TrendFilteredORB(Strategy):
             else:
                 return
 
-        # Poor regime + low AI confidence = skip ORB
         if orb_suitability == "poor" and regime_conf >= 0.70:
             self.log_message(f"SKIP {symbol} — poor regime for ORB")
             return
 
-        # AI grading
+        # ── AI grading ─────────────────────────────────────────────────────
         candles = [{"o": r["open"], "h": r["high"],
                      "l": r["low"],  "c": r["close"], "v": r["volume"]}
                    for _, r in df_today.iterrows()]
@@ -626,15 +699,13 @@ class TrendFilteredORB(Strategy):
             )
             return
 
-        # Dynamic sizing
-        base_risk      = self.parameters["risk_pct"]
-        size_mult      = grading.get("size_multiplier", 1.0)
+        # ── Dynamic sizing ─────────────────────────────────────────────────
+        base_risk    = self.parameters["risk_pct"]
+        size_mult    = grading.get("size_multiplier", 1.0)
         if hold_bias:
             size_mult *= self.parameters["hold_override_size"]
-        # Volatile regime: reduce size
         if regime_type == "volatile":
             size_mult *= 0.75
-            self.log_message(f"{symbol} volatile regime — reducing size to {size_mult:.2f}x")
         effective_risk = min(base_risk * size_mult, 0.02)
 
         risk_dist = abs(current - state["or_mid"]) * stop_adj
@@ -652,114 +723,16 @@ class TrendFilteredORB(Strategy):
         if qty < 1:
             return
 
-        self._submit_and_record(
-            symbol=symbol, exec_ticker=exec_ticker, direction=direction,
-            current=current, qty=qty, initial_stop=initial_stop,
-            initial_target=initial_target, effective_risk=effective_risk,
-            grading=grading, regime=regime, bias=bias, action=action,
-            state=state, direct=direct, hold_bias=hold_bias,
-            entry_type="ORB",
-        )
-
-    # ── Mean-Reversion Entry ──────────────────────────────────────────────
-
-    def _try_mean_reversion_entry(
-        self, symbol, exec_ticker, direction, df_today, state,
-        regime, bias, action, direct, pair, hold_bias,
-    ):
-        """
-        Attempt a mean-reversion entry (fade the breakout).
-        Only fires when regime is ranging/mean_reversion with high confidence.
-        """
-        if len(df_today) < 5:
-            return
-
-        rsi_current = compute_rsi(df_today["close"])
-        atr         = compute_atr(df_today)
-
-        mr_signal = get_mean_reversion_signal(
-            df_today=df_today,
-            or_high=state["or_high"],
-            or_low=state["or_low"],
-            or_mid=state["or_mid"],
-            regime=regime,
-            rsi_current=rsi_current,
-            atr=atr,
-        )
-
-        if not mr_signal:
-            return  # No valid mean-reversion setup
-
-        # Mean-reversion direction may differ from bias direction
-        mr_direction = mr_signal["direction"]
-
-        # For MR SHORT: need a bear ETF — skip direct-trade symbols
-        if mr_direction == "SHORT" and direct:
-            self.log_message(
-                f"SKIP {symbol} MR SHORT — no inverse ETF (direct trade)"
-            )
-            return
-
-        mr_exec = pair["bull"] if mr_direction == "LONG" else pair["bear"]
-        if mr_exec in self._positions:
-            return
-
-        # AI grading still applies — but with reduced confidence threshold for MR
-        candles = [{"o": r["open"], "h": r["high"],
-                     "l": r["low"],  "c": r["close"], "v": r["volume"]}
-                   for _, r in df_today.iterrows()]
-        avg_vol = float(df_today["volume"].mean()) if not df_today.empty else 1.0
-        grading = grade_setup(
-            symbol=symbol, direction=mr_direction, candles=candles,
-            or_high=state["or_high"], or_low=state["or_low"],
-            current_price=mr_signal["entry"], avg_volume=avg_vol,
-        )
-
-        # Mean-reversion uses slightly lower confidence bar (setup looks
-        # different to the AI which is trained to approve momentum breakouts)
-        if grading["confidence"] < 0.45:
-            self.log_message(
-                f"SKIP {symbol} MR — AI conf {grading['confidence']:.2f} too low"
-            )
-            return
-
-        # Size at 0.75x for mean-reversion (more uncertain than momentum)
-        effective_risk = min(self.parameters["risk_pct"] * 0.75, 0.015)
-        risk_dist      = mr_signal["risk"]
-        if risk_dist <= 0:
-            return
-
-        qty = int((self.portfolio_value * effective_risk) / risk_dist)
-        if qty < 1:
-            return
-
-        self._submit_and_record(
-            symbol=symbol, exec_ticker=mr_exec, direction=mr_direction,
-            current=mr_signal["entry"], qty=qty,
-            initial_stop=mr_signal["stop"], initial_target=mr_signal["target"],
-            effective_risk=effective_risk, grading=grading, regime=regime,
-            bias=bias, action=action, state=state, direct=direct,
-            hold_bias=hold_bias, entry_type="MEAN_REVERSION",
-            extra_log=mr_signal["reason"],
-        )
-
-    # ── Shared Order Submission + Journal ─────────────────────────────────
-
-    def _submit_and_record(
-        self, symbol, exec_ticker, direction, current, qty,
-        initial_stop, initial_target, effective_risk, grading,
-        regime, bias, action, state, direct, hold_bias,
-        entry_type="ORB", extra_log="",
-    ):
+        # ── Submit ─────────────────────────────────────────────────────────
         try:
-            order = self.create_order(exec_ticker, qty, "buy", time_in_force="day")
+            order = self.create_order(exec_ticker, qty, "buy",
+                                      time_in_force="day")
             self.submit_order(order)
         except Exception as e:
             self.log_message(f"Order failed {exec_ticker}: {e}")
             return
 
-        overnight_ok = direct and direction == "LONG"
-        size_mult    = grading.get("size_multiplier", 1.0)
+        overnight_eligible = direct and direction == "LONG"
 
         trade_id = self._journal.open_trade(
             symbol=symbol, exec_ticker=exec_ticker,
@@ -767,8 +740,7 @@ class TrendFilteredORB(Strategy):
             or_high=state["or_high"], or_low=state["or_low"],
             or_mid=state["or_mid"], initial_stop=initial_stop,
             initial_target=initial_target, risk_pct=effective_risk,
-            signal_action=action,
-            signal_source=f"technical+{entry_type}",
+            signal_action=action, signal_source="technical+ORB",
             bull_score=bias.get("bull_score", 0),
             bear_score=bias.get("bear_score", 0),
             signal_rsi=bias.get("rsi", 50),
@@ -781,9 +753,8 @@ class TrendFilteredORB(Strategy):
             ai_approved=grading.get("approve", True),
             regime=regime.get("regime", "unknown"),
             regime_conf=regime.get("confidence", 0.5),
-            orb_suitability=regime.get("orb_suitability", "moderate"),
-            stop_adjustment=regime.get("stop_adjustment", 1.0),
-            target_adjustment=regime.get("target_adjustment", 1.0),
+            orb_suitability=orb_suitability,
+            stop_adjustment=stop_adj, target_adjustment=target_adj,
             portfolio_value=self.portfolio_value,
             open_positions=len(self._positions),
         )
@@ -796,25 +767,22 @@ class TrendFilteredORB(Strategy):
             "target":       initial_target,
             "qty":          qty,
             "entry_value":  self.portfolio_value,
-            "overnight_ok": overnight_ok,
-            "entry_type":   entry_type,
+            "overnight_ok": overnight_eligible,
         }
         self._trade_ids[exec_ticker] = trade_id
         state["trade_taken"] = True
 
         tag   = "HOLD-OVERRIDE " if hold_bias else ""
-        o_tag = " [OVERNIGHT]" if overnight_ok else " [EOD]"
+        o_tag = " [OVERNIGHT]" if overnight_eligible else " [EOD]"
         msg   = (
-            f"{tag}{entry_type} {direction} | {symbol}→{exec_ticker} x{qty} "
+            f"{tag}ENTRY {direction} | {symbol}→{exec_ticker} x{qty} "
             f"@ {current:.2f} | Stop:{initial_stop:.2f} "
             f"Target:{initial_target:.2f} | "
             f"AI:{grading['confidence']:.2f}({size_mult:.1f}x) | "
             f"Regime:{regime.get('regime','?')}{o_tag}"
         )
-        if extra_log:
-            msg += f" | {extra_log}"
         self.log_message(msg)
-        self._notify(f"Trade-Bot: {tag}{entry_type} {direction} {exec_ticker}", msg)
+        self._notify(f"Trade-Bot: {tag}ENTRY {direction} {exec_ticker}", msg)
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

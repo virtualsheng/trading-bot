@@ -50,7 +50,7 @@ Every trade is recorded to a SQLite journal with full context for later analysis
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│              STARTUP (script launch)                     │
+│              STARTUP (script launch)                    │
 │  Ollama warmup → model loaded into memory               │
 │  Bias cache loaded from cache/daily_bias.json           │
 └──────────────────────────┬──────────────────────────────┘
@@ -58,7 +58,7 @@ Every trade is recorded to a SQLite journal with full context for later analysis
 ┌──────────────────────────▼──────────────────────────────┐
 │           SIGNAL LAYER (3:50 PM ET daily)               │
 │  symbols.txt → signal_engine.py                         │
-│  EMA 2/3/5 crossover + RSI + MACD + SMA50/200          │
+│  EMA 2/3/5 crossover + RSI + MACD + SMA50/200           │
 │  → BUY / SELL / HOLD per symbol                         │
 │  → cache/daily_bias.json (persisted overnight)          │
 └──────────────────────────┬──────────────────────────────┘
@@ -72,20 +72,20 @@ Every trade is recorded to a SQLite journal with full context for later analysis
 └──────────────────────────┬──────────────────────────────┘
                            │ candidate trade
 ┌──────────────────────────▼──────────────────────────────┐
-│                AI FUSION LAYER (Ollama)                  │
-│  Regime detect → trending / ranging / volatile /         │
-│                  mean_reversion / low_liquidity          │
-│       │                                                  │
+│                AI FUSION LAYER (Ollama)                 │
+│  Regime detect → trending / ranging / volatile /        │
+│                  mean_reversion / low_liquidity         │
+│       │                                                 │
 │       ├─ Trending   → ORB momentum entry                │
-│       ├─ Ranging    → Mean-reversion fade entry          │
+│       ├─ Ranging    → Mean-reversion fade entry         │
 │       ├─ Volatile   → ORB entry at 0.75x size           │
-│       └─ Low liquid → Skip entirely                      │
-│                                                          │
+│       └─ Low liquid → Skip entirely                     │
+│                                                         │
 │  Setup grader → confidence 0.0–1.0 → size multiplier    │
 └──────────────────────────┬──────────────────────────────┘
                            │ sized order
 ┌──────────────────────────▼──────────────────────────────┐
-│            EXECUTION & LOGGING                           │
+│            EXECUTION & LOGGING                          │
 │  Alpaca API (paper or live)                             │
 │  trade_journal.py → SQLite (cache/trade_journal.db)     │
 │  Notifications → Email / Discord / Telegram             │
@@ -149,7 +149,7 @@ Before each trade executes, the last 25 five-minute candles are passed to Ollama
 - Candle body strength at the moment of breakout
 - Successive momentum bars in the breakout direction
 
-The AI call only fires for symbols where a breakout is actually detected — not all 39 symbols on every iteration.
+The AI call only fires for symbols where a breakout is actually detected — not all 40 symbols on every iteration.
 
 Returns a **confidence score (0.0–1.0)** mapped to position size:
 
@@ -532,7 +532,7 @@ Notifications fire on: trade entry, trade exit (with P&L), EOD signal summary, a
 
 ## Symbols
 
-Default `symbols.txt` covers 39 symbols across multiple sectors:
+Default `symbols.txt` covers 40 symbols across multiple sectors:
 
 - **Broad market:** SPY, QQQ, SPMO, QQQM
 - **Semiconductors:** SMH, NVDA, MU, TSM, AMAT, LRCX, SNDK, DRAM
@@ -543,7 +543,7 @@ Default `symbols.txt` covers 39 symbols across multiple sectors:
 - **Energy/commodities:** DBC, NANR, REMX
 - **Space/defense:** UFO, RKLB
 - **Uranium:** URA, URNM
-- **International:** EWT, EWJV
+- **International:** EWT, EWY, EWJV
 - **Alternatives:** DBMF, GRID, CEG, JPM
 
 Add or remove symbols freely. New symbols not in `leverage_map.py` trade the underlying directly at 1×.
