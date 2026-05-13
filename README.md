@@ -2,8 +2,6 @@
 
 An AI-enhanced algorithmic trading system for US equities and leveraged ETFs. Combines momentum-based technical analysis with Opening Range Breakout (ORB) execution, filtered and sized by a local LLM running via Ollama.
 
-> **Status:** Active development — paper trading recommended until personal backtesting validation is complete.
-
 ---
 
 ## Table of Contents
