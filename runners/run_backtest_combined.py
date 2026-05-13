@@ -1,42 +1,34 @@
 """
-run_backtest_combined.py — Backtest TrendFilteredORB (full pipeline)
-─────────────────────────────────────────────────────────────────────
-Tests the SAME strategy that runs live:
-  • Multi-symbol (all symbols from symbols.txt + their leveraged pairs)
-  • Earnings filter
-  • AI regime detection (Ollama — must be running)
-  • Mean-reversion fallback
-  • Leveraged ETF routing via leverage_map.py
+run_backtest_combined.py — Focused pipeline validation backtest
+────────────────────────────────────────────────────────────────
+Tests QQQ → TQQQ / SQQQ only.
+Purpose: validate that TrendFilteredORB's signal flow, AI grading,
+regime detection, and ORB execution logic all work correctly —
+without spending 90 minutes fetching data for 50+ tickers.
 
-Data source: Polygon.io 5-min bars (free tier — cached after first run)
-Free tier rate limit: 5 req/min → 13s delay between pages.
-First run: ~30–90 min depending on symbol count. Subsequent runs: instant.
+Data source: Polygon.io 5-min bars (3 tickers, cached after first run).
+First run: ~5–10 min. Subsequent runs: instant from cache.
 
 BACKTEST-MODE BIAS:
-  TrendFilteredORB._run_eod_signals() calls the live Alpaca API, which
-  returns real-world signals for today — not the simulated backtest date.
-  To work around this, we pre-generate a neutral HOLD bias for all symbols
-  and write it to cache/daily_bias.json before the backtest starts.
-  We also set LUMIBOT_BACKTEST_MODE=true so the strategy skips live API
-  calls for bias generation and instead derives signals from simulated bars.
-
-Configure START/END and STARTING_CAPITAL below.
+  _run_eod_signals() normally calls the live Alpaca API, which returns
+  today's real prices — not simulated backtest prices. We suppress that
+  by setting LUMIBOT_BACKTEST_MODE=true and pre-seeding the bias cache
+  with a neutral HOLD. The strategy will update bias each simulated EOD
+  using the backtest engine's bar data via _run_eod_signals_backtest().
 """
 
 import os
 import sys
 import time
+import json
 import requests
 import pandas as pd
-import json
 from datetime import datetime
 from dotenv import load_dotenv
-load_dotenv()  # Must be before ALL lumibot imports
+load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Signal that we're in backtest mode — suppresses live Alpaca API calls
-# inside TrendFilteredORB._run_eod_signals()
 os.environ["LUMIBOT_BACKTEST_MODE"] = "true"
 
 from lumibot.backtesting import PandasDataBacktesting
@@ -49,140 +41,98 @@ END              = datetime(2025, 7, 1)
 STARTING_CAPITAL = 10_000
 CACHE_DIR        = "cache"
 
-# All signal symbols from symbols.txt + all their leveraged execution tickers
-# from leverage_map.py. The strategy needs data for every ticker it might trade.
-SIGNAL_TICKERS = [
-    "SPY", "QQQ", "SPMO", "QQQM",          # Broad market
-    "SMH", "NVDA", "MU", "AMAT", "LRCX",   # Semiconductors
-    "TSM", "SNDK", "DRAM",
-    "GLDM", "PSLV", "GDXJ", "GDMN",        # Precious metals
-    "GDE", "ARIS", "AG", "PAAS", "SLVP",
-    "IBIT",                                  # Crypto
-    "JPM",                                   # Financials
-    "PLTR", "ROBO",                          # Tech/AI
-    "NANR", "DBC", "REMX",                  # Commodities
-    "UFO", "RKLB",                           # Space/Defense
-    "URA", "URNM",                           # Uranium
-    "EWT", "EWJV",                           # International
-    "DBMF", "GRID", "CEG",                  # Alternatives
-]
+TICKERS = ["QQQ", "TQQQ", "SQQQ"]
 
-LEVERAGED_TICKERS = [
-    "TQQQ", "SQQQ",         # Nasdaq 3x
-    "SPXL", "SPXS",         # S&P 500 3x
-    "SOXL", "SOXS",         # Semiconductor 3x
-    "NVDL", "NVDD",         # NVDA 2x
-    "TSMU",                  # TSM 2x
-    "UGL",  "GLL",          # Gold 2x
-    "AGQ",  "ZSL",          # Silver 2x
-    "JNUG", "JDST",         # Junior gold miners 2x
-    "BITX",                  # Bitcoin 2x
-    "FAS",  "FAZ",          # Financials 3x
-    "ERX",  "ERY",          # Energy 2x
-    "PTIR",                  # PLTR 2x
-]
+PARAMS = {
+    "orb_minutes":        15,
+    "bar_minutes":        5,
+    "risk_pct":           0.01,
+    "reward_ratio":       2.0,
+    "eod_exit_time":      "15:45",
+    "max_positions":      8,
+    "ai_min_confidence":  0.55,
+    "hold_override":      False,
+    "hold_override_size": 0.5,
+}
 
-# Combine — deduplicated, preserving order
-ALL_TICKERS = list(dict.fromkeys(SIGNAL_TICKERS + LEVERAGED_TICKERS))
-
-# Free tier: 5 requests/min → 13s between pages keeps us safe
 RATE_LIMIT_DELAY = 13
 
 
-# ── Backtest-mode bias ──────────────────────────────────────────────────────────
+# ── Bias seed ──────────────────────────────────────────────────────────────────
 
 def write_neutral_bias(symbols: list, start: datetime):
     """
-    Write a neutral HOLD bias for all symbols to the cache before the backtest.
-
-    Why: TrendFilteredORB._run_eod_signals() normally hits the live Alpaca API
-    to generate signals. During backtesting that returns today's real prices,
-    not simulated prices from the backtest period. We pre-seed the cache with
-    HOLD so no stale live-data signals leak into the simulation. The strategy
-    will update the bias naturally as it processes each simulated day.
+    Pre-seed the bias cache with HOLD for all symbols before the backtest.
+    Prevents stale live-API signals from leaking into the simulation.
+    The strategy updates this each simulated EOD via _run_eod_signals_backtest().
     """
     os.makedirs(CACHE_DIR, exist_ok=True)
-    bias = {}
-    for symbol in symbols:
-        bias[symbol] = {
-            "action":     "HOLD",
-            "bull_score": 0,
-            "bear_score": 0,
-            "rsi":        50.0,
-            "vol_ratio":  1.0,
-            "date":       start.strftime("%Y-%m-%d"),
-            "source":     "BACKTEST_INIT",
+    bias = {
+        s: {
+            "action": "HOLD", "bull_score": 0, "bear_score": 0,
+            "rsi": 50.0, "vol_ratio": 1.0,
+            "date": start.strftime("%Y-%m-%d"), "source": "BACKTEST_INIT",
         }
+        for s in symbols
+    }
     path = os.path.join(CACHE_DIR, "daily_bias.json")
     with open(path, "w") as f:
         json.dump(bias, f, indent=2)
-    print(f"✅ Wrote neutral bias for {len(bias)} symbols → {path}")
+    print(f"✅ Neutral bias written for {len(bias)} symbols → {path}")
 
 
-# ── Polygon data fetcher ────────────────────────────────────────────────────────
+# ── Polygon fetcher ────────────────────────────────────────────────────────────
 
 def fetch_from_polygon(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
     api_key = os.getenv("POLYGON_API_KEY")
     if not api_key:
         raise ValueError("POLYGON_API_KEY not found in .env")
 
-    all_bars = []
+    all_bars, page = [], 1
     url = (
         f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/5/minute"
         f"/{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
         f"?adjusted=true&sort=asc&limit=50000&apiKey={api_key}"
     )
 
-    page = 1
     while url:
-        print(f"  [{symbol}] Page {page} — requesting...")
+        print(f"  [{symbol}] Page {page}...")
         resp = requests.get(url, timeout=30)
-
         if resp.status_code == 429:
-            wait = 60
-            print(f"  429 Rate limited — waiting {wait}s...")
-            time.sleep(wait)
+            print(f"  Rate limited — waiting 60s...")
+            time.sleep(60)
             continue
-
         resp.raise_for_status()
         data = resp.json()
-
-        results = data.get("results", [])
-        all_bars.extend(results)
-        print(f"  [{symbol}] Page {page}: {len(results)} bars "
-              f"(running total: {len(all_bars)})")
-
+        all_bars.extend(data.get("results", []))
+        print(f"  [{symbol}] {len(all_bars)} bars so far")
         next_url = data.get("next_url")
         if next_url:
             url = f"{next_url}&apiKey={api_key}"
             page += 1
-            print(f"  Waiting {RATE_LIMIT_DELAY}s (free tier rate limit)...")
             time.sleep(RATE_LIMIT_DELAY)
         else:
             url = None
 
     if not all_bars:
-        raise ValueError(f"No Polygon data returned for {symbol}")
+        raise ValueError(f"No data returned for {symbol}")
 
     df = pd.DataFrame(all_bars)
     df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
-    df = df.rename(columns={
-        "o": "open", "h": "high",
-        "l": "low",  "c": "close", "v": "volume"
-    })
+    df = df.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
     df = df.set_index("timestamp")[["open", "high", "low", "close", "volume"]]
     df.index = df.index.tz_convert("America/New_York")
     df = df.between_time("09:30", "16:00")
-    print(f"  ✅ {symbol}: {len(df)} bars ready")
+    print(f"  ✅ {symbol}: {len(df)} bars")
     return df
 
 
-def get_cached_data(symbol: str, start: datetime, end: datetime):
+def get_cached_data(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
     os.makedirs(CACHE_DIR, exist_ok=True)
     path = os.path.join(CACHE_DIR, f"{symbol}_{start.date()}_{end.date()}_5min.csv")
 
     if os.path.exists(path):
-        print(f"📂 {symbol}: loading from cache ({path})")
+        print(f"📂 {symbol}: from cache")
         df = pd.read_csv(path, index_col=0, parse_dates=True)
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index, utc=True)
@@ -191,80 +141,38 @@ def get_cached_data(symbol: str, start: datetime, end: datetime):
         df.index = df.index.tz_convert("America/New_York")
         return df
 
-    print(f"🌐 {symbol}: not cached, fetching from Polygon...")
-    try:
-        df = fetch_from_polygon(symbol, start, end)
-        df.to_csv(path)
-        print(f"💾 {symbol}: cached to {path}")
-        print(f"⏳ Waiting 15s before next ticker...")
-        time.sleep(15)
-        return df
-    except ValueError as e:
-        print(f"  ⚠️  {symbol}: skipping — {e}")
-        return None
-
-
-def build_pandas_data(tickers, start, end):
-    """Build {Asset: Data} dict for PandasDataBacktesting. Skips missing tickers."""
-    pandas_data = {}
-    skipped = []
-    for ticker in tickers:
-        df = get_cached_data(ticker, start, end)
-        if df is None or df.empty:
-            skipped.append(ticker)
-            continue
-        asset = Asset(symbol=ticker, asset_type="stock")
-        pandas_data[asset] = Data(asset, df, timestep="minute")
-        print(f"✅ {ticker} loaded: {len(df)} bars "
-              f"({df.index[0].date()} → {df.index[-1].date()})")
-
-    if skipped:
-        print(f"\n⚠️  Skipped {len(skipped)} tickers with no Polygon data: {skipped}")
-        print("   Strategy will gracefully skip these symbols during simulation.\n")
-
-    return pandas_data
+    print(f"🌐 {symbol}: fetching from Polygon...")
+    df = fetch_from_polygon(symbol, start, end)
+    df.to_csv(path)
+    print(f"💾 {symbol}: cached → {path}")
+    time.sleep(15)
+    return df
 
 
 # ── Main ────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("=" * 70)
-    print("  TREND-FILTERED ORB — FULL PIPELINE BACKTEST")
-    print("=" * 70)
+    print("=" * 60)
+    print("  TREND-FILTERED ORB — PIPELINE VALIDATION BACKTEST")
+    print("=" * 60)
+    print(f"  Symbols        : {TICKERS}")
     print(f"  Period         : {START.date()} → {END.date()}")
-    print(f"  Signal tickers : {len(SIGNAL_TICKERS)}")
-    print(f"  Leveraged ETFs : {len(LEVERAGED_TICKERS)}")
-    print(f"  Total tickers  : {len(ALL_TICKERS)}")
     print(f"  Starting Cap   : ${STARTING_CAPITAL:,}")
-    print(f"  Backtest mode  : live Alpaca API calls suppressed")
-    print()
-    print("  Ollama must be running (ollama serve) for AI grading.")
-    print("  If Ollama is down, ai_engine falls back gracefully to confidence=0.6.")
-    print()
-    print("  First run fetches 5-min Polygon data for all tickers.")
-    print("  Free tier (~13s/page) — expect 60–90 min for a full fetch.")
-    print("  Subsequent runs load from cache instantly.")
-    print("=" * 70 + "\n")
+    print(f"  Backtest mode  : live Alpaca API suppressed")
+    print(f"  Ollama         : must be running for AI grading")
+    print("=" * 60 + "\n")
 
-    # Pre-seed neutral bias so no stale live-API data leaks into the simulation
-    write_neutral_bias(SIGNAL_TICKERS, START)
+    write_neutral_bias(["QQQ"], START)
 
-    pandas_data = build_pandas_data(ALL_TICKERS, START, END)
-
-    PARAMS = {
-        "orb_minutes":        15,
-        "bar_minutes":        5,
-        "risk_pct":           0.01,
-        "reward_ratio":       2.0,
-        "eod_exit_time":      "15:45",
-        "max_positions":      8,
-        "ai_min_confidence":  0.55,
-        "hold_override":      False,
-        "hold_override_size": 0.5,
-    }
+    pandas_data = {}
+    for ticker in TICKERS:
+        df    = get_cached_data(ticker, START, END)
+        asset = Asset(symbol=ticker, asset_type="stock")
+        pandas_data[asset] = Data(asset, df, timestep="minute")
+        print(f"✅ {ticker}: {len(df)} bars ({df.index[0].date()} → {df.index[-1].date()})")
 
     pd.options.mode.chained_assignment = None
-    print("\n🚀 Starting Backtest...")
+    print("\n🚀 Starting backtest...")
 
     TrendFilteredORB.run_backtest(
         datasource_class=PandasDataBacktesting,
@@ -278,6 +186,6 @@ if __name__ == "__main__":
         save_tearsheet=True,
     )
 
-    print("\n" + "=" * 70)
-    print("BACKTEST COMPLETE — check logs/ for tearsheet and trade CSV")
-    print("=" * 70)
+    print("\n" + "=" * 60)
+    print("BACKTEST COMPLETE — check logs/ for tearsheet")
+    print("=" * 60)
