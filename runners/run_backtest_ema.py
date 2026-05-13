@@ -1,21 +1,26 @@
 """
-Run a backtest of the EMA Crossover strategy.
-Uses Yahoo Finance data (free, no API key needed).
-Change the dates to test different time periods.
+run_backtest_ema.py — EMA Crossover Strategy backtest
+───────────────────────────────────────────────────────
+Uses Yahoo Finance daily data (free, no API key needed).
+3-year window includes the 2022 bear market, 2023 recovery, 2024–2025 bull run.
+
+Change BACKTESTING_START/END to test different periods.
 """
 import os
 from dotenv import load_dotenv
-load_dotenv()  # Must be before ALL other imports
+load_dotenv()  # Must be before ALL lumibot imports
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import datetime
-from lumibot.backtesting import BacktestingBroker, YahooDataBacktesting
-from lumibot.traders import Trader
+from lumibot.backtesting import YahooDataBacktesting
 from strategies.ema_crossover_strategy import EMACrossoverStrategy
 
-# ── Backtest configuration ────────────────────────────────────────────────
+# ── Backtest configuration ─────────────────────────────────────────────────────
 BACKTESTING_START = datetime(2022, 1, 1)
 BACKTESTING_END   = datetime(2025, 1, 1)
-STARTING_CAPITAL  = 2000
+STARTING_CAPITAL  = 10_000   # Match your actual account size for realistic results
 
 PARAMS = {
     "underlying":     "QQQ",
@@ -34,27 +39,25 @@ PARAMS = {
 }
 
 if __name__ == "__main__":
-    # ── Set up backtesting broker using Yahoo Finance (no API keys needed) ─
-    data_source = YahooDataBacktesting(
-        datetime_start=BACKTESTING_START,
-        datetime_end=BACKTESTING_END,
-    )
-    broker = BacktestingBroker(data_source)
-
-    # ── Instantiate strategy with backtesting broker ───────────────────────
-    strategy = EMACrossoverStrategy(
-        broker=broker,
-        parameters=PARAMS,
-    )
-
-    # ── Run backtest ───────────────────────────────────────────────────────
-    trader = Trader(backtest=True)
-    trader.add_strategy(strategy)
-    strategy_executors = trader.run_all()
-
-    print("\n" + "="*50)
-    print("EMA CROSSOVER BACKTEST COMPLETE")
-    print(f"Period: {BACKTESTING_START.date()} → {BACKTESTING_END.date()}")
+    print("=" * 60)
+    print("EMA CROSSOVER BACKTEST")
+    print(f"Period         : {BACKTESTING_START.date()} → {BACKTESTING_END.date()}")
     print(f"Starting Capital: ${STARTING_CAPITAL:,}")
-    print("Check the logs/ folder for detailed results and charts")
-    print("="*50)
+    print("=" * 60 + "\n")
+
+    EMACrossoverStrategy.run_backtest(
+        datasource_class=YahooDataBacktesting,
+        backtesting_start=BACKTESTING_START,
+        backtesting_end=BACKTESTING_END,
+        parameters=PARAMS,
+        initial_portfolio_value=STARTING_CAPITAL,
+        benchmark_asset="QQQ",
+        show_plot=True,
+        show_tearsheet=True,
+        save_tearsheet=True,
+    )
+
+    print("\n" + "=" * 60)
+    print("EMA CROSSOVER BACKTEST COMPLETE")
+    print("Check logs/ for tearsheet, equity curve, and trade CSV")
+    print("=" * 60)

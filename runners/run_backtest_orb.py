@@ -1,26 +1,32 @@
 """
-Run a backtest of the Opening Range Breakout strategy.
-NOTE: ORB uses 5-minute bars. Yahoo Finance free tier provides
-intraday data for the last 60 days only.
+run_backtest_orb.py — Base ORB Strategy backtest (Polygon.io intraday)
+────────────────────────────────────────────────────────────────────────
+Backtests the standalone ORBStrategy (no AI, no regime filter, no earnings).
+Useful as a baseline to compare against TrendFilteredORB (run_backtest_combined.py).
 
-For longer backtests (1-2 years), you need:
-- Alpaca free data API (market hours, limited history)
-- Polygon.io free tier (recommended — use code LUMI10 for 10% off)
-
-For now this runs a 30-day backtest using Yahoo intraday data.
+Requires POLYGON_API_KEY in .env.
+LumiBot's PolygonDataBacktesting handles pagination and caching internally.
 """
-# THIS MUST BE FIRST — before any lumibot imports
 import os
+import sys
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv()  # Must be before ALL lumibot imports
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import datetime, timedelta
 from lumibot.backtesting import PolygonDataBacktesting
 from strategies.orb_strategy import ORBStrategy
 
-# Using Polygon intraday
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+if not POLYGON_API_KEY:
+    raise ValueError("POLYGON_API_KEY not set in .env")
+
+# ── Date range ─────────────────────────────────────────────────────────────────
 END   = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 START = END - timedelta(days=365)
+
+STARTING_CAPITAL = 10_000
 
 PARAMS = {
     "underlying":     "QQQ",
@@ -28,30 +34,37 @@ PARAMS = {
     "bear_ticker":    "SQQQ",
     "orb_minutes":    15,
     "bar_minutes":    5,
-    "risk_pct":       0.01,    # Risk 1% per trade
-    "reward_ratio":   2.0,     # 2:1 target
+    "risk_pct":       0.01,
+    "reward_ratio":   2.0,
     "eod_exit_time":  "15:45",
 }
 
 if __name__ == "__main__":
-    result = ORBStrategy.run_backtest(
+    print("=" * 60)
+    print("BASE ORB STRATEGY BACKTEST (no AI / no regime filter)")
+    print(f"Period          : {START.date()} → {END.date()}")
+    print(f"Starting Capital: ${STARTING_CAPITAL:,}")
+    print("Note: compare this to run_backtest_combined.py to measure")
+    print("      the value added by the AI + regime filter layer.")
+    print("=" * 60 + "\n")
+
+    # LumiBot's PolygonDataBacktesting reads POLYGON_API_KEY from env automatically.
+    # run_backtest() returns the Strategy instance (not a dict) — stats are
+    # printed by LumiBot to the tearsheet and logs.
+    ORBStrategy.run_backtest(
         datasource_class=PolygonDataBacktesting,
         backtesting_start=START,
         backtesting_end=END,
         parameters=PARAMS,
+        initial_portfolio_value=STARTING_CAPITAL,
         benchmark_asset="QQQ",
         show_plot=True,
         show_tearsheet=True,
-        initial_portfolio_value=2000,
+        save_tearsheet=True,
+        polygon_api_key=POLYGON_API_KEY,
     )
-    
-    print("\n" + "="*50)
-    print("ORB BACKTEST RESULTS (30-day)")
-    print("="*50)
-    if result:
-        print(f"Total Return:     {result.get('total_return', 'N/A'):.2%}")
-        print(f"Benchmark:        {result.get('benchmark_return', 'N/A'):.2%}")
-        print(f"Sharpe Ratio:     {result.get('sharpe', 'N/A'):.2f}")
-        print(f"Max Drawdown:     {result.get('max_drawdown', 'N/A'):.2%}")
-        print(f"Win Rate:         {result.get('win_rate', 'N/A'):.2%}")
-        print(f"Total Trades:     {result.get('total_trades', 'N/A')}")
+
+    print("\n" + "=" * 60)
+    print("BASE ORB BACKTEST COMPLETE")
+    print("Check logs/ for tearsheet and trade CSV")
+    print("=" * 60)
