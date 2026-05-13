@@ -14,6 +14,7 @@ import sys
 from dotenv import load_dotenv
 from datetime import datetime
 import pytz
+import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -121,6 +122,23 @@ def main():
     body = "\n".join(results)
     if high_conviction:
         body += "\n\nHIGH CONVICTION:\n" + "\n".join(high_conviction)
+
+    # Write bias cache so live bot can use these signals tomorrow
+    bias = {}
+    for symbol in SYMBOLS:
+        r = get_technical_signal(symbol, API_KEY, SECRET_KEY)
+        bias[symbol] = {
+            "action":     r.get("action", "HOLD"),
+            "bull_score": r.get("bull_score", 0),
+            "bear_score": r.get("bear_score", 0),
+            "rsi":        r.get("rsi", 50),
+            "vol_ratio":  r.get("volume_ratio", 1.0),
+            "date":       now_est.strftime("%Y-%m-%d"),
+        }
+    os.makedirs("cache", exist_ok=True)
+    with open("cache/daily_bias.json", "w") as f:
+        json.dump(bias, f, indent=2)
+    print("\n✅ Bias cache written to cache/daily_bias.json")
 
     try:
         send_email(header, body)
