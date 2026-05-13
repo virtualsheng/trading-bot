@@ -138,7 +138,7 @@ class TrendFilteredORB(Strategy):
         "risk_pct":           0.01,
         "reward_ratio":       2.0,
         "eod_exit_time":      "15:45",
-        "max_positions":      5,
+        "max_positions":      8,
         "ai_min_confidence":  0.55,
         "hold_override":      False,
         "hold_override_size": 0.5,
@@ -474,7 +474,17 @@ class TrendFilteredORB(Strategy):
           "PRELIM" — 3:50 PM run, prices ~10 min before close
           "FINAL"  — 4:15 PM run, official closing prices
           "PRE-MARKET" — fallback if no cache at startup
+
+        BACKTEST MODE: When LUMIBOT_BACKTEST_MODE=true, get_technical_signal()
+        would call the live Alpaca API and return today's real-world prices
+        rather than simulated backtest prices. We skip the live API entirely
+        and instead derive a simple bias from the simulated bar data available
+        in the backtesting engine.
         """
+        if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
+            self._run_eod_signals_backtest(label)
+            return
+
         api_key    = os.getenv("ALPACA_API_KEY")
         secret_key = os.getenv("ALPACA_API_SECRET")
         symbols    = self._load_symbols()
@@ -523,6 +533,115 @@ class TrendFilteredORB(Strategy):
         self.log_message(summary)
         self._notify(f"Trade-Bot: [{label}] EOD Signals", summary)
 
+    def _run_eod_signals_backtest(self, label: str):
+        """
+        Backtest-mode bias generation. Derives BUY/SELL/HOLD from simulated
+        bar data via get_historical_prices() instead of calling the live Alpaca API.
+
+        Uses a simplified EMA 2/3/5 + SMA200 signal — the same logic as
+        signal_engine.py but reading from the backtesting engine's data feed.
+        """
+        symbols = self._load_symbols()
+        self.log_message(
+            f"[{label}][BACKTEST] Deriving bias from simulated bars for "
+            f"{len(symbols)} symbols..."
+        )
+        new_bias = {}
+        buys, sells = [], []
+
+        for symbol in symbols:
+            try:
+                bars = self.get_historical_prices(symbol, 300, "day")
+                if bars is None or len(bars.df) < 30:
+                    new_bias[symbol] = {
+                        "action": "HOLD", "bull_score": 0, "bear_score": 0,
+                        "rsi": 50.0, "vol_ratio": 1.0,
+                        "date": str(self.get_datetime().date()), "source": label,
+                    }
+                    continue
+
+                close = bars.df["close"].dropna()
+                volume = bars.df["volume"].dropna()
+
+                ema2 = close.ewm(span=2, adjust=False).mean()
+                ema3 = close.ewm(span=3, adjust=False).mean()
+                ema5 = close.ewm(span=5, adjust=False).mean()
+                sma50  = close.rolling(50).mean()
+                sma200 = close.rolling(200).mean()
+
+                # Simple RSI via EWM
+                delta = close.diff()
+                gain = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+                loss = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
+                rs = gain / loss.replace(0, 1e-10)
+                rsi = (100 - 100 / (1 + rs)).iloc[-1]
+
+                # MACD histogram
+                ema12 = close.ewm(span=12, adjust=False).mean()
+                ema26 = close.ewm(span=26, adjust=False).mean()
+                macd_line = ema12 - ema26
+                signal_line = macd_line.ewm(span=9, adjust=False).mean()
+                hist = macd_line - signal_line
+
+                price     = close.iloc[-1]
+                bull_score = sum([
+                    ema2.iloc[-1] > ema3.iloc[-1] and ema3.iloc[-1] > ema5.iloc[-1],
+                    price > sma50.iloc[-1],
+                    price > sma200.iloc[-1],
+                    hist.iloc[-1] > 0,
+                    rsi < 45,
+                ])
+                bear_score = sum([
+                    ema2.iloc[-1] < ema3.iloc[-1] and ema3.iloc[-1] < ema5.iloc[-1],
+                    price < sma50.iloc[-1],
+                    price < sma200.iloc[-1],
+                    hist.iloc[-1] < 0,
+                    rsi > 60,
+                ])
+
+                avg_vol = volume.rolling(20).mean().iloc[-1]
+                vol_ratio = float(volume.iloc[-1] / avg_vol) if avg_vol > 0 else 1.0
+
+                if bull_score >= 5 and rsi < 68 and vol_ratio > 1.1:
+                    action = "STRONG_BUY"
+                elif bull_score >= 4 and rsi < 62:
+                    action = "BUY"
+                elif bear_score >= 5 and rsi > 32 and vol_ratio > 1.1:
+                    action = "STRONG_SELL"
+                elif bear_score >= 4 and rsi > 38:
+                    action = "SELL"
+                else:
+                    action = "HOLD"
+
+                new_bias[symbol] = {
+                    "action":     action,
+                    "bull_score": int(bull_score),
+                    "bear_score": int(bear_score),
+                    "rsi":        round(float(rsi), 2),
+                    "vol_ratio":  round(vol_ratio, 2),
+                    "date":       str(self.get_datetime().date()),
+                    "source":     label,
+                }
+                if action in ("BUY", "STRONG_BUY"):
+                    buys.append(symbol)
+                elif action in ("SELL", "STRONG_SELL"):
+                    sells.append(symbol)
+
+            except Exception as e:
+                new_bias[symbol] = {
+                    "action": "HOLD", "bull_score": 0, "bear_score": 0,
+                    "rsi": 50.0, "vol_ratio": 1.0,
+                    "date": str(self.get_datetime().date()), "source": label,
+                }
+
+        self._daily_bias = new_bias
+        self._save_bias(new_bias)
+        self.log_message(
+            f"[{label}][BACKTEST] Bias updated | "
+            f"BUY:{len(buys)} SELL:{len(sells)} "
+            f"HOLD:{len(symbols)-len(buys)-len(sells)}"
+        )
+
     # ── Regime Refresh ────────────────────────────────────────────────────
 
     def _refresh_regime(self, symbol: str):
@@ -530,7 +649,8 @@ class TrendFilteredORB(Strategy):
             bars_5m  = self.get_historical_prices(symbol, 20, "5m")
             bars_15m = self.get_historical_prices(symbol, 20, "15m")
             bars_1h  = self.get_historical_prices(symbol, 10, "1H")
-            if bars_5m is None:
+            # Guard: need at least 14 bars for ATR/RSI calculation
+            if bars_5m is None or len(bars_5m.df) < 14:
                 return
 
             def to_list(bars):
