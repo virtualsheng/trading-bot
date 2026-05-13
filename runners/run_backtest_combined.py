@@ -41,7 +41,7 @@ END              = datetime(2025, 7, 1)
 STARTING_CAPITAL = 10_000
 CACHE_DIR        = "cache"
 
-TICKERS = ["QQQ", "TQQQ", "SQQQ"]
+TICKERS = ["QQQ", "TQQQ", "SQQQ", "SPY", "SPXL", "SPXS", "SMH", "SOXL", "SOXS"]
 
 PARAMS = {
     "orb_minutes":        15,
@@ -162,7 +162,7 @@ if __name__ == "__main__":
     print(f"  Ollama         : must be running for AI grading")
     print("=" * 60 + "\n")
 
-    write_neutral_bias(["QQQ"], START)
+    write_neutral_bias(["QQQ", "SPY", "SMH"], START)
 
     pandas_data = {}
     for ticker in TICKERS:

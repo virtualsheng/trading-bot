@@ -1,335 +1,47 @@
 {
   "SPY": {
     "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
+    "bull_score": 4,
+    "bear_score": 1,
+    "rsi": 76.68,
+    "vol_ratio": 2.13,
+    "date": "2025-06-30",
+    "source": "PRELIM"
   },
   "QQQ": {
     "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
+    "bull_score": 4,
+    "bear_score": 1,
+    "rsi": 78.21,
+    "vol_ratio": 1.7,
+    "date": "2025-06-30",
+    "source": "PRELIM"
   },
-  "SPMO": {
+  "TQQQ": {
     "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
+    "bull_score": 4,
+    "bear_score": 1,
+    "rsi": 77.79,
+    "vol_ratio": 1.46,
+    "date": "2025-06-30",
+    "source": "PRELIM"
   },
-  "QQQM": {
+  "SQQQ": {
     "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
+    "bull_score": 1,
+    "bear_score": 4,
+    "rsi": 22.67,
+    "vol_ratio": 1.24,
+    "date": "2025-06-30",
+    "source": "PRELIM"
   },
   "SMH": {
     "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "NVDA": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "MU": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "AMAT": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "LRCX": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "TSM": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "SNDK": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "DRAM": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "GLDM": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "PSLV": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "GDXJ": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "GDMN": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "GDE": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "ARIS": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "AG": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "PAAS": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "SLVP": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "IBIT": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "JPM": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "PLTR": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "ROBO": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "NANR": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "DBC": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "REMX": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "UFO": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "RKLB": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "URA": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "URNM": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "EWT": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "EWJV": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "DBMF": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "GRID": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
-  },
-  "CEG": {
-    "action": "HOLD",
-    "bull_score": 0,
-    "bear_score": 0,
-    "rsi": 50.0,
-    "vol_ratio": 1.0,
-    "date": "2024-07-01",
-    "source": "BACKTEST_INIT"
+    "bull_score": 4,
+    "bear_score": 1,
+    "rsi": 70.21,
+    "vol_ratio": 1.43,
+    "date": "2025-06-30",
+    "source": "PRELIM"
   }
 }

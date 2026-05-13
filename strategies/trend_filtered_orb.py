@@ -138,7 +138,7 @@ class TrendFilteredORB(Strategy):
         "risk_pct":           0.01,
         "reward_ratio":       2.0,
         "eod_exit_time":      "15:45",
-        "max_positions":      8,
+        "max_positions":      5,
         "ai_min_confidence":  0.55,
         "hold_override":      False,
         "hold_override_size": 0.5,
@@ -164,19 +164,21 @@ class TrendFilteredORB(Strategy):
         self._daily_bias = self._load_bias()
         self._journal    = TradeJournal()
 
-        # ── Warm up Ollama immediately at script start ─────────────────────
-        # Model loads into memory now so it's ready when first trade fires.
-        try:
-            available = check_ollama_available()
-            if available:
-                self.log_message("Ollama ready — AI grading active")
-            else:
-                self.log_message(
-                    "⚠️  Ollama unavailable — trades will use fallback "
-                    "confidence (0.5x size). Run: ollama serve"
-                )
-        except Exception as e:
-            self.log_message(f"Ollama warmup error: {e}")
+        # ── Warm up Ollama (skipped in backtest mode) ─────────────────────
+        if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
+            self.log_message("BACKTEST MODE — AI/regime skipped for speed")
+        else:
+            try:
+                available = check_ollama_available()
+                if available:
+                    self.log_message("Ollama ready — AI grading active")
+                else:
+                    self.log_message(
+                        "⚠️  Ollama unavailable — trades will use fallback "
+                        "confidence (0.5x size). Run: ollama serve"
+                    )
+            except Exception as e:
+                self.log_message(f"Ollama warmup error: {e}")
 
         self.log_message(
             f"Initialized | bias: {len(self._daily_bias)} symbols | "
@@ -192,9 +194,10 @@ class TrendFilteredORB(Strategy):
         except Exception:
             pass
 
-        # Pre-warm regime so first trade has a reading immediately
-        self._refresh_regime("QQQ")
-        self._regime_checked_at = self.get_datetime()
+        # Pre-warm regime (skipped in backtest mode — no Ollama calls)
+        if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() != "true":
+            self._refresh_regime("QQQ")
+            self._regime_checked_at = self.get_datetime()
 
         # Run signals if no bias cache from yesterday
         if not self._daily_bias:
@@ -276,9 +279,10 @@ class TrendFilteredORB(Strategy):
         # Uses prior-day bias — acts if symbol flipped to SELL overnight
         self._check_and_close_sell_signals(reason="SELL_SIGNAL")
 
-        # ── Regime refresh every 30 min ───────────────────────────────────
-        if (self._regime_checked_at is None or
-                (now - self._regime_checked_at).seconds >= 1800):
+        # ── Regime refresh every 30 min (skipped in backtest mode) ──────────
+        if (os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() != "true" and
+                (self._regime_checked_at is None or
+                 (now - self._regime_checked_at).seconds >= 1800)):
             self._refresh_regime("QQQ")
             self._regime_checked_at = now
 
@@ -475,11 +479,9 @@ class TrendFilteredORB(Strategy):
           "FINAL"  — 4:15 PM run, official closing prices
           "PRE-MARKET" — fallback if no cache at startup
 
-        BACKTEST MODE: When LUMIBOT_BACKTEST_MODE=true, get_technical_signal()
-        would call the live Alpaca API and return today's real-world prices
-        rather than simulated backtest prices. We skip the live API entirely
-        and instead derive a simple bias from the simulated bar data available
-        in the backtesting engine.
+        BACKTEST MODE: When LUMIBOT_BACKTEST_MODE=true, routes to
+        _run_eod_signals_backtest() which derives signals from simulated
+        5-min bar data instead of calling the live Alpaca API.
         """
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
             self._run_eod_signals_backtest(label)
@@ -535,24 +537,45 @@ class TrendFilteredORB(Strategy):
 
     def _run_eod_signals_backtest(self, label: str):
         """
-        Backtest-mode bias generation. Derives BUY/SELL/HOLD from simulated
-        bar data via get_historical_prices() instead of calling the live Alpaca API.
+        Backtest-mode bias generation using simulated 5-min bar data.
 
-        Uses a simplified EMA 2/3/5 + SMA200 signal — the same logic as
-        signal_engine.py but reading from the backtesting engine's data feed.
+        Only processes symbols that are actually present in pandas_data
+        (i.e. have data loaded into the backtesting engine). Avoids
+        requesting "day" bars which LumiBot tries to synthesize from
+        minutes and generates 400k-row lookback errors.
+
+        Signal logic mirrors signal_engine.py: EMA 2/3/5 + RSI + MACD
+        + SMA50/200 derived from the last 100 5-min bars of the day.
         """
-        symbols = self._load_symbols()
+        # Only run signals for symbols that have data in this backtest
+        all_symbols  = self._load_symbols()
+        avail_symbols = []
+        for s in all_symbols:
+            try:
+                bars = self.get_historical_prices(s, 3, "5m")
+                if bars is not None and len(bars.df) > 0:
+                    avail_symbols.append(s)
+            except Exception:
+                pass
+
+        if not avail_symbols:
+            self.log_message(f"[{label}][BACKTEST] No symbols with data — skipping")
+            return
+
         self.log_message(
-            f"[{label}][BACKTEST] Deriving bias from simulated bars for "
-            f"{len(symbols)} symbols..."
+            f"[{label}][BACKTEST] Deriving bias from 5-min bars for "
+            f"{len(avail_symbols)}/{len(all_symbols)} symbols with data..."
         )
+
         new_bias = {}
         buys, sells = [], []
 
-        for symbol in symbols:
+        for symbol in avail_symbols:
             try:
-                bars = self.get_historical_prices(symbol, 300, "day")
-                if bars is None or len(bars.df) < 30:
+                # Use 5-min bars — the only timestep we have in pandas_data.
+                # 100 bars = ~8 hours of data (enough for EMA/RSI on the day).
+                bars = self.get_historical_prices(symbol, 100, "5m")
+                if bars is None or len(bars.df) < 10:
                     new_bias[symbol] = {
                         "action": "HOLD", "bull_score": 0, "bear_score": 0,
                         "rsi": 50.0, "vol_ratio": 1.0,
@@ -560,47 +583,42 @@ class TrendFilteredORB(Strategy):
                     }
                     continue
 
-                close = bars.df["close"].dropna()
+                close  = bars.df["close"].dropna()
                 volume = bars.df["volume"].dropna()
 
-                ema2 = close.ewm(span=2, adjust=False).mean()
-                ema3 = close.ewm(span=3, adjust=False).mean()
-                ema5 = close.ewm(span=5, adjust=False).mean()
-                sma50  = close.rolling(50).mean()
-                sma200 = close.rolling(200).mean()
+                ema2 = close.ewm(span=2,  adjust=False).mean()
+                ema3 = close.ewm(span=3,  adjust=False).mean()
+                ema5 = close.ewm(span=5,  adjust=False).mean()
+                sma50  = close.rolling(min(50,  len(close))).mean()
+                sma200 = close.rolling(min(200, len(close))).mean()
 
-                # Simple RSI via EWM
                 delta = close.diff()
-                gain = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
-                loss = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
-                rs = gain / loss.replace(0, 1e-10)
-                rsi = (100 - 100 / (1 + rs)).iloc[-1]
+                gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+                loss  = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
+                rsi   = float((100 - 100 / (1 + gain / loss.replace(0, 1e-10))).iloc[-1])
 
-                # MACD histogram
-                ema12 = close.ewm(span=12, adjust=False).mean()
-                ema26 = close.ewm(span=26, adjust=False).mean()
-                macd_line = ema12 - ema26
-                signal_line = macd_line.ewm(span=9, adjust=False).mean()
-                hist = macd_line - signal_line
+                ema12    = close.ewm(span=12, adjust=False).mean()
+                ema26    = close.ewm(span=26, adjust=False).mean()
+                macd_hist = (ema12 - ema26) - (ema12 - ema26).ewm(span=9, adjust=False).mean()
 
-                price     = close.iloc[-1]
+                price = float(close.iloc[-1])
                 bull_score = sum([
-                    ema2.iloc[-1] > ema3.iloc[-1] and ema3.iloc[-1] > ema5.iloc[-1],
-                    price > sma50.iloc[-1],
-                    price > sma200.iloc[-1],
-                    hist.iloc[-1] > 0,
+                    float(ema2.iloc[-1]) > float(ema3.iloc[-1]) and float(ema3.iloc[-1]) > float(ema5.iloc[-1]),
+                    price > float(sma50.iloc[-1]),
+                    price > float(sma200.iloc[-1]),
+                    float(macd_hist.iloc[-1]) > 0,
                     rsi < 45,
                 ])
                 bear_score = sum([
-                    ema2.iloc[-1] < ema3.iloc[-1] and ema3.iloc[-1] < ema5.iloc[-1],
-                    price < sma50.iloc[-1],
-                    price < sma200.iloc[-1],
-                    hist.iloc[-1] < 0,
+                    float(ema2.iloc[-1]) < float(ema3.iloc[-1]) and float(ema3.iloc[-1]) < float(ema5.iloc[-1]),
+                    price < float(sma50.iloc[-1]),
+                    price < float(sma200.iloc[-1]),
+                    float(macd_hist.iloc[-1]) < 0,
                     rsi > 60,
                 ])
 
-                avg_vol = volume.rolling(20).mean().iloc[-1]
-                vol_ratio = float(volume.iloc[-1] / avg_vol) if avg_vol > 0 else 1.0
+                avg_vol   = float(volume.rolling(min(20, len(volume))).mean().iloc[-1])
+                vol_ratio = float(volume.iloc[-1]) / avg_vol if avg_vol > 0 else 1.0
 
                 if bull_score >= 5 and rsi < 68 and vol_ratio > 1.1:
                     action = "STRONG_BUY"
@@ -617,7 +635,7 @@ class TrendFilteredORB(Strategy):
                     "action":     action,
                     "bull_score": int(bull_score),
                     "bear_score": int(bear_score),
-                    "rsi":        round(float(rsi), 2),
+                    "rsi":        round(rsi, 2),
                     "vol_ratio":  round(vol_ratio, 2),
                     "date":       str(self.get_datetime().date()),
                     "source":     label,
@@ -639,7 +657,7 @@ class TrendFilteredORB(Strategy):
         self.log_message(
             f"[{label}][BACKTEST] Bias updated | "
             f"BUY:{len(buys)} SELL:{len(sells)} "
-            f"HOLD:{len(symbols)-len(buys)-len(sells)}"
+            f"HOLD:{len(avail_symbols)-len(buys)-len(sells)}"
         )
 
     # ── Regime Refresh ────────────────────────────────────────────────────
@@ -647,9 +665,16 @@ class TrendFilteredORB(Strategy):
     def _refresh_regime(self, symbol: str):
         try:
             bars_5m  = self.get_historical_prices(symbol, 20, "5m")
-            bars_15m = self.get_historical_prices(symbol, 20, "15m")
-            bars_1h  = self.get_historical_prices(symbol, 10, "1H")
-            # Guard: need at least 14 bars for ATR/RSI calculation
+            # Only request multi-timeframe bars in live mode — in backtest mode
+            # only 5-min data exists; requesting 15m/1H causes LumiBot to try
+            # synthesizing from minutes with an enormous lookback that always fails.
+            if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
+                bars_15m = None
+                bars_1h  = None
+            else:
+                bars_15m = self.get_historical_prices(symbol, 20, "15m")
+                bars_1h  = self.get_historical_prices(symbol, 10, "1H")
+            # Need at least 14 bars for ATR/RSI — skip silently at backtest start
             if bars_5m is None or len(bars_5m.df) < 14:
                 return
 
@@ -766,18 +791,26 @@ class TrendFilteredORB(Strategy):
         current = float(df_today["close"].iloc[-1])
 
         # ── Regime check ───────────────────────────────────────────────────
-        regime          = get_cached_regime(symbol)
-        if regime.get("regime") == "unknown":
-            regime = get_cached_regime("QQQ")
-        regime_type     = regime.get("regime", "unknown")
-        regime_conf     = regime.get("confidence", 0.5)
-        orb_suitability = regime.get("orb_suitability", "moderate")
-        stop_adj        = regime.get("stop_adjustment", 1.0)
-        target_adj      = regime.get("target_adjustment", 1.0)
+        # In backtest mode, skip Ollama regime calls — assume moderate/neutral.
+        if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
+            regime_type     = "trending"
+            regime_conf     = 0.5
+            orb_suitability = "moderate"
+            stop_adj        = 1.0
+            target_adj      = 1.0
+        else:
+            regime          = get_cached_regime(symbol)
+            if regime.get("regime") == "unknown":
+                regime = get_cached_regime("QQQ")
+            regime_type     = regime.get("regime", "unknown")
+            regime_conf     = regime.get("confidence", 0.5)
+            orb_suitability = regime.get("orb_suitability", "moderate")
+            stop_adj        = regime.get("stop_adjustment", 1.0)
+            target_adj      = regime.get("target_adjustment", 1.0)
 
-        if regime_type == "low_liquidity" and regime_conf >= 0.70:
-            self.log_message(f"SKIP {symbol} — low liquidity regime")
-            return
+            if regime_type == "low_liquidity" and regime_conf >= 0.70:
+                self.log_message(f"SKIP {symbol} — low liquidity regime")
+                return
 
         # ── Check breakout ─────────────────────────────────────────────────
         is_long_break  = current > state["or_high"]
@@ -801,16 +834,19 @@ class TrendFilteredORB(Strategy):
             self.log_message(f"SKIP {symbol} — poor regime for ORB")
             return
 
-        # ── AI grading ─────────────────────────────────────────────────────
-        candles = [{"o": r["open"], "h": r["high"],
-                     "l": r["low"],  "c": r["close"], "v": r["volume"]}
-                   for _, r in df_today.iterrows()]
-        avg_vol = float(df_today["volume"].mean()) if not df_today.empty else 1.0
-        grading = grade_setup(
-            symbol=symbol, direction=direction, candles=candles,
-            or_high=state["or_high"], or_low=state["or_low"],
-            current_price=current, avg_volume=avg_vol,
-        )
+        # ── AI grading (skipped in backtest mode) ─────────────────────────
+        if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
+            grading = {"approve": True, "confidence": 0.7, "size_multiplier": 1.0}
+        else:
+            candles = [{"o": r["open"], "h": r["high"],
+                         "l": r["low"],  "c": r["close"], "v": r["volume"]}
+                       for _, r in df_today.iterrows()]
+            avg_vol = float(df_today["volume"].mean()) if not df_today.empty else 1.0
+            grading = grade_setup(
+                symbol=symbol, direction=direction, candles=candles,
+                or_high=state["or_high"], or_low=state["or_low"],
+                current_price=current, avg_volume=avg_vol,
+            )
 
         if not grading.get("approve", True):
             self.log_message(
@@ -907,6 +943,8 @@ class TrendFilteredORB(Strategy):
     # ── Helpers ───────────────────────────────────────────────────────────
 
     def _notify(self, subject: str, body: str):
+        if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
+            return
         full = f"{subject}\n{body}"
         try:
             send_email(subject, body)
