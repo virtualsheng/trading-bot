@@ -3,10 +3,9 @@ End-of-day technical signal check.
 Run via cron at 3:50pm EST on weekdays:
   50 15 * * 1-5 python alerts/run_technical_signals.py
 
-Reads daily bars, computes EMA/RSI/MACD signals,
-and prints a clear BUY/SELL/HOLD for each symbol.
-This is the EOD version of the 3:50-4:15pm alerts.
-Primary bias for next day's trading decisions
+Fixed: previously called get_technical_signal() twice per symbol
+(once for display, once for bias cache). Now does a single pass and
+reuses results for both display and cache write.
 """
 
 import os
@@ -25,14 +24,15 @@ from notifications.telegram import send_telegram_message
 
 load_dotenv()
 
-API_KEY = os.getenv("ALPACA_API_KEY")
+API_KEY    = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_API_SECRET")
 
 
 def load_symbols(filename="symbols.txt"):
     try:
         with open(filename, "r") as f:
-            return [line.strip().upper() for line in f if line.strip() and not line.startswith("#")]
+            return [line.strip().upper() for line in f
+                    if line.strip() and not line.startswith("#")]
     except FileNotFoundError:
         return ["SPY", "QQQ", "TQQQ", "SQQQ", "SMH"]
 
@@ -50,27 +50,30 @@ def main():
         return
 
     SYMBOLS = load_symbols()
-    est = pytz.timezone("US/Eastern")
+    est     = pytz.timezone("US/Eastern")
     now_est = datetime.now(est)
-    header = f"TECHNICAL SIGNALS {now_est.strftime('%Y-%m-%d %H:%M')} ET"
+    header  = f"Trade-Bot: TECHNICAL SIGNALS {now_est.strftime('%Y-%m-%d %H:%M')} ET"
 
     print("=" * 120)
     print(header)
     print("=" * 120)
 
-    results = []
-    high_conviction = []
+    results          = []
+    high_conviction  = []
+    # ── Single pass: store results for both display AND bias cache ─────────
+    signal_results   = {}
 
     for symbol in SYMBOLS:
         result = get_technical_signal(symbol, API_KEY, SECRET_KEY)
-        
-        action = result.get("action", "ERROR")
-        rsi = result.get("rsi", "N/A")
-        bull = result.get("bull_score", "N/A")
-        bear = result.get("bear_score", "N/A")
-        pct_chg = result.get("pct_change_open", 0)
+        signal_results[symbol] = result   # cache for bias write below
+
+        action    = result.get("action", "ERROR")
+        rsi       = result.get("rsi", "N/A")
+        bull      = result.get("bull_score", "N/A")
+        bear      = result.get("bear_score", "N/A")
+        pct_chg   = result.get("pct_change_open", 0)
         vol_ratio = result.get("volume_ratio", 1.0)
-        rsi_int = result.get("rsi_interpretation", "Neutral")
+        rsi_int   = result.get("rsi_interpretation", "Neutral")
         above_200 = result.get("above_sma200", False)
 
         if action == "ERROR":
@@ -83,7 +86,7 @@ def main():
             line = (
                 f"{prefix} {symbol:<6}: {action:<12} | "
                 f"RSI={rsi} ({rsi_int}) | "
-                f"Chg={pct_chg:+.2f}% | "
+                f"ChgOpen={pct_chg:+.2f}% | "
                 f"Vol={vol_ratio:.2f}x | "
                 f"Bull={bull} Bear={bear} | Above200={above_200}"
             )
@@ -100,9 +103,9 @@ def main():
     print("SUMMARY & RECOMMENDATION")
     print("=" * 120)
 
-    # Market Context using SPY/QQQ
-    spy_result = next((get_technical_signal(s, API_KEY, SECRET_KEY) for s in ["SPY", "QQQ"] if s in SYMBOLS), {})
-    spy_rsi = spy_result.get("rsi", 50)
+    # Market context from cached results — no second API call
+    spy_result   = signal_results.get("SPY") or signal_results.get("QQQ") or {}
+    spy_rsi      = spy_result.get("rsi", 50) or 50
 
     if spy_rsi > 70:
         market_tone = "⚠️  Broad market is OVERBOUGHT (RSI > 70). Caution on new longs."
@@ -119,14 +122,10 @@ def main():
     else:
         print("\n🟡 No high conviction signals today.")
 
-    body = "\n".join(results)
-    if high_conviction:
-        body += "\n\nHIGH CONVICTION:\n" + "\n".join(high_conviction)
-
-    # Write bias cache so live bot can use these signals tomorrow
+    # ── Write bias cache using already-fetched results ─────────────────────
     bias = {}
     for symbol in SYMBOLS:
-        r = get_technical_signal(symbol, API_KEY, SECRET_KEY)
+        r = signal_results.get(symbol, {})
         bias[symbol] = {
             "action":     r.get("action", "HOLD"),
             "bull_score": r.get("bull_score", 0),
@@ -139,6 +138,10 @@ def main():
     with open("cache/daily_bias.json", "w") as f:
         json.dump(bias, f, indent=2)
     print("\n✅ Bias cache written to cache/daily_bias.json")
+
+    body = "\n".join(results)
+    if high_conviction:
+        body += "\n\nHIGH CONVICTION:\n" + "\n".join(high_conviction)
 
     try:
         send_email(header, body)

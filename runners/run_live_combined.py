@@ -1,16 +1,19 @@
 """
 run_live_combined.py — Launch the Trend-Filtered ORB Strategy
 ──────────────────────────────────────────────────────────────
-Runs the full AI-enhanced pipeline:
+Full AI-enhanced pipeline:
   EOD Technical Signals → Bias Cache
-  Morning ORB → AI Grader → Regime Filter → Dynamic Sizing → Alpaca
+  Morning ORB / Mean-Reversion → AI Grader → Regime Filter → Alpaca
 
 Switch paper/live: set ALPACA_IS_PAPER=true/false in .env
 """
 
 import os
+import sys
 from dotenv import load_dotenv
-load_dotenv()   # Must be before lumibot imports
+load_dotenv()
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lumibot.brokers import Alpaca
 from lumibot.traders import Trader
@@ -33,14 +36,21 @@ def main():
     }
 
     PARAMS = {
-        "orb_minutes":       15,
-        "bar_minutes":       5,
-        "risk_pct":          0.01,     # 1% base risk — AI scales up/down
-        "reward_ratio":      2.0,
-        "eod_exit_time":     "15:45",
-        "max_positions":     3,
-        "ai_min_confidence": 0.55,     # Skip trades below this AI score
-        "hold_override_size": 0.5,     # 0.5x size when bias=HOLD but ORB fires
+        "orb_minutes":              15,
+        "bar_minutes":              5,
+        "risk_pct":                 0.01,
+        "reward_ratio":             2.0,
+        "eod_exit_time":            "15:45",
+        "max_positions":            5,
+        "ai_min_confidence":        0.55,
+        "hold_override":            False,
+        "hold_override_size":       0.5,
+        # Earnings filter
+        "earnings_filter_enabled":  True,
+        "earnings_buffer_hours":    48,
+        # Regime switching
+        "regime_switching_enabled": True,
+        "mean_reversion_min_conf":  0.70,
     }
 
     broker   = Alpaca(BROKER_CONFIG)
@@ -63,22 +73,27 @@ def main():
     print(f"  Base Risk/Trade   : {PARAMS['risk_pct']*100:.0f}% (AI scales to 2x max)")
     print(f"  Max Positions     : {PARAMS['max_positions']}")
     print(f"  AI Min Confidence : {PARAMS['ai_min_confidence']}")
-    print(f"  HOLD Override     : {PARAMS['hold_override_size']}x size")
+    print(f"  HOLD Override     : {PARAMS['hold_override']}")
+    print(f"  Earnings Filter   : ±{PARAMS['earnings_buffer_hours']}h buffer")
+    print(f"  Regime Switching  : {PARAMS['regime_switching_enabled']}")
     print(f"  Ollama Model      : qwen3:8b (localhost:11434)")
     print(f"  Trade Journal     : cache/trade_journal.db")
     print("=" * 70)
     print()
     print("  Daily schedule:")
-    print("  • 9:30 AM ET  — ORB monitoring begins")
-    print("  • 9:45 AM ET  — Earliest ORB entry (after OR established)")
+    print("  • ~9:00 AM ET — Ollama warmup, earnings cache clear")
+    print("  • 9:30 AM ET  — Position sync from Alpaca")
+    print("  • 9:45 AM ET  — ORB / mean-reversion entries begin")
     print("  • Every 30min — Regime detection refresh")
-    print("  • 3:45 PM ET  — All positions closed")
+    print("  • Noon         — No new entries after this")
+    print("  • 3:45 PM ET  — Leveraged ETFs closed")
     print("  • 3:50 PM ET  — EOD signals run, bias cached for tomorrow")
     print()
-    print("  AI pipeline per trade:")
-    print("  • Setup Grader   → confidence 0.0-1.0, size multiplier")
-    print("  • Regime Detect  → market state, stop/target adjustment")
-    print("  • Trade Narrator → journal entry after close")
+    print("  Strategy switching:")
+    print("  • Trending regime   → ORB momentum entries")
+    print("  • Ranging regime    → Mean-reversion fade entries")
+    print("  • Low liquidity     → Skip entirely")
+    print("  • Earnings within 48h → Skip symbol")
     print()
     print("  To stop: Ctrl+C")
     print("=" * 70 + "\n")

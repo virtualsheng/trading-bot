@@ -1,10 +1,13 @@
 import os
+import sys
 import time
 import requests
 import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()  # Must be before ALL lumibot imports
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lumibot.backtesting import PandasDataBacktesting
 from lumibot.entities import Asset, Data

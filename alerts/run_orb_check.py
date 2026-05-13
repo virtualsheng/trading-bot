@@ -56,7 +56,7 @@ def main():
     est = pytz.timezone("US/Eastern")
     now = datetime.now(est)
     
-    header = f"ORB SIGNALS {now.strftime('%Y-%m-%d %H:%M')} ET"
+    header = f"Trade-Bot: ORB SIGNALS {now.strftime('%Y-%m-%d %H:%M')} ET"
 
     print("=" * 110)
     print(header)
