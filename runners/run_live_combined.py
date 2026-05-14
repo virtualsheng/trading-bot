@@ -23,6 +23,14 @@ Logging fix (v7):
   LumiBot installs its own console handler at startup, so adding another
   StreamHandler causes every line to print twice. The file handler alone
   captures all output (LumiBot, strategy, ai_engine) to the log file.
+
+run_live_combined.py — Launch the Trend-Filtered ORB Strategy v8
+──────────────────────────────────────────────────────────────────
+v8 changes:
+  - FINAL EOD signals now run via after_market_closes() lifecycle hook
+    (fixes the bug where LumiBot blocked on_trading_iteration after 4:03 PM)
+  - SENTIMENT_ENDPOINT shown in startup banner for easy debugging
+  - File logging only (no duplicate StreamHandler)
 """
 
 import os
@@ -70,29 +78,16 @@ def main():
     PARAMS = {
         "orb_minutes":        15,
         "bar_minutes":        5,
-        "risk_pct":           0.01,     # 1% base risk per position
+        "risk_pct":           0.01,
         "reward_ratio":       2.0,
         "eod_exit_time":      "15:45",
         "max_positions":      8,
         "ai_min_confidence":  0.55,
         "hold_override":      False,
         "hold_override_size": 0.5,
-
-        # ── Position sizing guards ─────────────────────────────────────────
-        # Minimum stop distance as % of price. Prevents absurdly large share
-        # counts when the OR is very tight (e.g. flat open, <0.1% range).
-        "min_stop_pct":       0.005,    # 0.5% of price minimum stop distance
-
-        # Maximum single-position value as % of portfolio. Hard cap regardless
-        # of qty calculation — prevents over-concentration in one symbol.
-        "max_position_pct":   0.15,     # 15% of portfolio max per position
-
-        # ── ORB breakout filter ────────────────────────────────────────────
-        # Minimum breakout beyond the OR boundary before entry fires.
-        # 0.1% filters out noise right at the OR edge.
-        "min_breakout_pct":   0.001,    # 0.1% beyond OR boundary
-
-        # ── Swing / Tax-Efficient Mode ─────────────────────────────────────
+        "min_stop_pct":       0.005,
+        "max_position_pct":   0.15,
+        "min_breakout_pct":   0.001,
         "swing_mode":                  os.getenv("SWING_MODE", "false").lower() == "true",
         "swing_min_conviction":        75,
         "swing_sell_cooldown_days":    90,
@@ -111,12 +106,13 @@ def main():
     trader.add_strategy(strategy)
 
     mode                 = "📄 PAPER TRADING" if is_paper else "💰 LIVE TRADING ⚠️ REAL MONEY"
-    sentiment_url        = os.getenv("SENTIMENT_API_URL", "http://localhost:8000")
+    sentiment_url        = os.getenv("SENTIMENT_API_URL",   "http://localhost:8000")
+    sentiment_endpoint   = os.getenv("SENTIMENT_ENDPOINT",  "/analyze")
     sentiment_configured = bool(os.getenv("SENTIMENT_ADMIN_TOKEN", ""))
     swing_mode           = PARAMS["swing_mode"]
 
     print("\n" + "=" * 70)
-    print("  🚀  TREND-FILTERED ORB — AI-ENHANCED LIVE STRATEGY  v7")
+    print("  🚀  TREND-FILTERED ORB — AI-ENHANCED LIVE STRATEGY  v8")
     print("=" * 70)
     print(f"  Mode              : {mode}")
     print(f"  Symbols           : symbols.txt ({_count_symbols()} symbols)")
@@ -136,7 +132,9 @@ def main():
     print(f"  Ollama Model      : llama3.2:3b (localhost:11434)")
     print(f"  Trade Journal     : cache/trade_journal.db")
     print(f"  Log File          : {_log_file}")
-    print(f"  Sentiment Alpha   : {sentiment_url} ({'token set ✅' if sentiment_configured else 'no token ⚠️'})")
+    print(f"  Sentiment Alpha   : {sentiment_url}{sentiment_endpoint} "
+          f"({'token set ✅' if sentiment_configured else 'no token ⚠️'})")
+    print(f"  (if 404: browse {sentiment_url}/docs → set SENTIMENT_ENDPOINT in .env)")
     print("=" * 70)
     print()
     print("  Daily schedule:")
@@ -146,10 +144,12 @@ def main():
     print("  • 9:45 AM – noon  — ORB entries (BUY bias OR confirmed HOLD breakout)")
     print("  • Every 30 min    — Regime detection refresh")
     print("  • 3:45 PM ET      — Leveraged ETFs closed")
-    print("  • 3:50 PM ET      — Preliminary signals (prelim close prices)")
+    print("  • 3:50 PM ET      — PRELIM signals (prelim close prices)")
     print("                      → SELL signals acted on immediately")
-    print("  • 4:15 PM ET      — FINAL signals (official closing prices)")
-    print("                      → Any new SELL signals acted on")
+    print("  • ~4:00 PM ET     — FINAL signals via after_market_closes()")
+    print("                      → Official close prices, SELL signals acted on")
+    print("                      (moved from 4:15 PM iteration — LumiBot blocks")
+    print("                       on_trading_iteration after market close)")
     if swing_mode:
         print("  • Overnight        — All positions held (swing mode)")
     else:
@@ -162,8 +162,6 @@ def main():
     print("  • No entry if price is inside the opening range (WAIT state)")
     print()
     print("  Off-hours: bot sleeps — no API calls, no log noise")
-    print("  Active window: Mon–Fri 9:30 AM – 4:25 PM ET only")
-    print()
     print("  To stop: Ctrl+C")
     print("=" * 70 + "\n")
 
