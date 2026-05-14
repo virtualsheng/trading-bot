@@ -67,8 +67,22 @@ Changes in v5:
   + Ollama warmup moved to initialize() so model loads at script start
     not at market open
 
-Key behaviors from v3/v4 unchanged:
-  - Leveraged/inverse ETFs closed at 3:45 PM
+TrendFilteredORB Strategy — v6
+────────────────────────────────
+Changes in v6:
+  + Swing mode (SWING_MODE=true in .env or swing_mode param):
+      - No leveraged/inverse ETFs — trades underlying ETF directly
+      - LONG only — no short entries
+      - Entry gated on swing_min_conviction threshold
+      - SELL throttled by swing_sell_cooldown_days (default 90d)
+      - Force-sell override: bypasses cooldown when ALL THREE gates fire:
+          conviction >= swing_force_sell_conviction (default 85)
+          bear_score >= swing_force_sell_bear_score (default 5)
+          action == STRONG_SELL
+      - _last_swing_sell dict tracks last sell date per symbol
+
+Key behaviors from v3/v4/v5 unchanged:
+  - Leveraged/inverse ETFs closed at EOD (irrelevant in swing mode)
   - Direct-trade symbols held overnight, closed on SELL signal
   - Broker position sync at 9:30 AM market open
   - ORB entries once per symbol 9:45 AM – noon
@@ -83,7 +97,7 @@ import os
 import json
 import pandas as pd
 import numpy as np
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, date as ddate
 from lumibot.strategies import Strategy
 
 import sys
@@ -108,8 +122,8 @@ except ImportError:
     _PREMARKET_AVAILABLE = False
 
 
-SYMBOLS_FILE       = "symbols.txt"
-BIAS_CACHE         = "cache/daily_bias.json"
+SYMBOLS_FILE        = "symbols.txt"
+BIAS_CACHE          = "cache/daily_bias.json"
 BIAS_CACHE_BACKTEST = "cache/daily_bias_backtest.json"
 
 # ── Signal timing ─────────────────────────────────────────────────────────
@@ -150,6 +164,12 @@ class TrendFilteredORB(Strategy):
         "ai_min_confidence":  0.55,
         "hold_override":      False,
         "hold_override_size": 0.5,
+        # Swing mode defaults (overridden by run_live_combined.py PARAMS)
+        "swing_mode":                  False,
+        "swing_min_conviction":        75,
+        "swing_sell_cooldown_days":    90,
+        "swing_force_sell_conviction": 85,
+        "swing_force_sell_bear_score": 5,
     }
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
@@ -168,6 +188,11 @@ class TrendFilteredORB(Strategy):
         self._orb_state  = {}
         self._positions  = {}
         self._trade_ids  = {}
+
+        # Swing mode: tracks last sell date per symbol to enforce
+        # the quarterly cooldown (swing_sell_cooldown_days).
+        # Key: signal symbol (e.g. "QQQ"), Value: datetime.date of last sell.
+        self._last_swing_sell: dict = {}
 
         self._daily_bias = self._load_bias()
         self._journal    = TradeJournal()
@@ -188,9 +213,11 @@ class TrendFilteredORB(Strategy):
             except Exception as e:
                 self.log_message(f"Ollama warmup error: {e}")
 
+        swing_mode = self.parameters.get("swing_mode", False)
         self.log_message(
             f"Initialized | bias: {len(self._daily_bias)} symbols | "
-            f"portfolio: ${self.portfolio_value:,.2f}"
+            f"portfolio: ${self.portfolio_value:,.2f} | "
+            f"swing_mode: {'ON' if swing_mode else 'off'}"
         )
 
     def startup_refresh(self):
@@ -472,8 +499,6 @@ class TrendFilteredORB(Strategy):
                     )
             if synced:
                 self.log_message(f"Synced from Alpaca: {synced}")
-            if synced:
-                self.log_message(f"Synced from Alpaca: {synced}")
         except Exception as e:
             self.log_message(f"Position sync failed: {e}")
 
@@ -485,28 +510,91 @@ class TrendFilteredORB(Strategy):
         daily bias. If the symbol has flipped to SELL/STRONG_SELL, close
         the position immediately.
 
+        In swing mode, applies a two-gate system:
+          - Gate 1 (routine): days since last sell >= swing_sell_cooldown_days
+          - Gate 2 (force): ALL THREE of conviction, bear_score, STRONG_SELL
+            must fire simultaneously to override the cooldown early.
+
         Called in three places:
           1. During market hours (9:30–3:45): acts on prior-day bias
           2. After 3:50 PM preliminary signals: acts on fresh prelim prices
           3. After 4:15 PM final signals: acts on official close prices
-
-        This replaces the old _check_overnight_exits() which only ran once
-        per iteration and never re-ran after signals were refreshed.
         """
+        swing_mode      = self.parameters.get("swing_mode", False)
+        cooldown_days   = self.parameters.get("swing_sell_cooldown_days", 90)
+        force_conv_gate = self.parameters.get("swing_force_sell_conviction", 85)
+        force_bear_gate = self.parameters.get("swing_force_sell_bear_score", 5)
+
         for exec_ticker, pos in list(self._positions.items()):
             if not pos.get("overnight_ok", False):
                 continue  # Leveraged positions handled by _close_leveraged_positions
 
             symbol = pos.get("symbol", exec_ticker)
-            action = self._daily_bias.get(symbol, {}).get("action", "HOLD")
+            bias   = self._daily_bias.get(symbol, {})
+            action = bias.get("action", "HOLD")
 
             if action not in ("SELL", "STRONG_SELL"):
                 continue
 
-            self.log_message(
-                f"SELL signal [{reason}] | closing {exec_ticker} "
-                f"(signal symbol: {symbol} → {action})"
-            )
+            # ── Swing mode sell gate ──────────────────────────────────────
+            if swing_mode:
+                last_sell  = self._last_swing_sell.get(symbol)
+                days_since = (ddate.today() - last_sell).days if last_sell else 999
+
+                # Recompute conviction from bias cache
+                bear_score   = bias.get("bear_score", 0)
+                vol_ratio    = bias.get("vol_ratio", 1.0)
+                action_bonus = 10 if action == "STRONG_SELL" else 0
+                conviction   = (
+                    bias.get("ai_confidence", 0.60) * 40
+                    + bear_score * 8
+                    + min(vol_ratio - 1.0, 1.0) * 10
+                    + action_bonus
+                )
+
+                within_cooldown = days_since < cooldown_days
+
+                # All THREE conditions must be true to override cooldown
+                is_force_sell = (
+                    conviction     >= force_conv_gate
+                    and bear_score >= force_bear_gate
+                    and action     == "STRONG_SELL"
+                )
+
+                if within_cooldown and not is_force_sell:
+                    self.log_message(
+                        f"[SWING] 🔒 Holding {symbol} — {days_since}d since last sell "
+                        f"(cooldown={cooldown_days}d) | "
+                        f"conviction={conviction:.0f} bear={bear_score} {action} — "
+                        f"not strong enough to override"
+                    )
+                    continue  # Skip this sell
+
+                if within_cooldown and is_force_sell:
+                    self.log_message(
+                        f"[SWING] ⚡ FORCE-SELL {symbol} — all three gates fired: "
+                        f"conviction={conviction:.0f}>={force_conv_gate}, "
+                        f"bear_score={bear_score}>={force_bear_gate}, "
+                        f"action=STRONG_SELL | only {days_since}d since last sell — "
+                        f"overriding {cooldown_days}d cooldown"
+                    )
+                else:
+                    self.log_message(
+                        f"[SWING] 📅 Routine sell {symbol} — {days_since}d >= "
+                        f"{cooldown_days}d cooldown elapsed | "
+                        f"conviction={conviction:.0f} bear={bear_score} {action}"
+                    )
+
+                # Record sell date before executing
+                self._last_swing_sell[symbol] = ddate.today()
+
+            else:
+                # Normal day-trading path
+                self.log_message(
+                    f"SELL signal [{reason}] | closing {exec_ticker} "
+                    f"(signal symbol: {symbol} → {action})"
+                )
+
             try:
                 bars = self.get_historical_prices(exec_ticker, 2, "5m")
                 exit_price = (float(bars.df["close"].iloc[-1])
@@ -693,7 +781,7 @@ class TrendFilteredORB(Strategy):
         + SMA50/200 derived from the last 100 5-min bars of the day.
         """
         # Only run signals for symbols that have data in this backtest
-        all_symbols  = self._load_symbols()
+        all_symbols   = self._load_symbols()
         avail_symbols = []
         for s in all_symbols:
             try:
@@ -742,28 +830,33 @@ class TrendFilteredORB(Strategy):
                 loss  = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
                 rsi   = float((100 - 100 / (1 + gain / loss.replace(0, 1e-10))).iloc[-1])
 
-                ema12    = close.ewm(span=12, adjust=False).mean()
-                ema26    = close.ewm(span=26, adjust=False).mean()
+                ema12     = close.ewm(span=12, adjust=False).mean()
+                ema26     = close.ewm(span=26, adjust=False).mean()
                 macd_hist = (ema12 - ema26) - (ema12 - ema26).ewm(span=9, adjust=False).mean()
 
                 price = float(close.iloc[-1])
                 bull_score = sum([
-                    float(ema2.iloc[-1]) > float(ema3.iloc[-1]) and float(ema3.iloc[-1]) > float(ema5.iloc[-1]),
+                    float(ema2.iloc[-1]) > float(ema3.iloc[-1]),
+                    float(ema3.iloc[-1]) > float(ema5.iloc[-1]),
                     price > float(sma50.iloc[-1]),
                     price > float(sma200.iloc[-1]),
+                    rsi < 62,
                     float(macd_hist.iloc[-1]) > 0,
-                    rsi < 45,
                 ])
                 bear_score = sum([
-                    float(ema2.iloc[-1]) < float(ema3.iloc[-1]) and float(ema3.iloc[-1]) < float(ema5.iloc[-1]),
+                    float(ema2.iloc[-1]) < float(ema3.iloc[-1]),
+                    float(ema3.iloc[-1]) < float(ema5.iloc[-1]),
                     price < float(sma50.iloc[-1]),
                     price < float(sma200.iloc[-1]),
+                    rsi > 38,
                     float(macd_hist.iloc[-1]) < 0,
-                    rsi > 60,
                 ])
 
-                avg_vol   = float(volume.rolling(min(20, len(volume))).mean().iloc[-1])
-                vol_ratio = float(volume.iloc[-1]) / avg_vol if avg_vol > 0 else 1.0
+                vol_ratio = 1.0
+                if len(volume) >= 20:
+                    avg_vol = float(volume.rolling(20).mean().iloc[-1])
+                    if avg_vol > 0:
+                        vol_ratio = float(volume.iloc[-1]) / avg_vol
 
                 if bull_score >= 5 and rsi < 68 and vol_ratio > 1.1:
                     action = "STRONG_BUY"
@@ -785,12 +878,14 @@ class TrendFilteredORB(Strategy):
                     "date":       str(self.get_datetime().date()),
                     "source":     label,
                 }
+
                 if action in ("BUY", "STRONG_BUY"):
                     buys.append(symbol)
                 elif action in ("SELL", "STRONG_SELL"):
                     sells.append(symbol)
 
             except Exception as e:
+                self.log_message(f"[{label}][BACKTEST] Signal error {symbol}: {e}")
                 new_bias[symbol] = {
                     "action": "HOLD", "bull_score": 0, "bear_score": 0,
                     "rsi": 50.0, "vol_ratio": 1.0,
@@ -800,7 +895,7 @@ class TrendFilteredORB(Strategy):
         self._daily_bias = new_bias
         self._save_bias(new_bias)
         self.log_message(
-            f"[{label}][BACKTEST] Bias updated | "
+            f"[{label}][BACKTEST] Done | "
             f"BUY:{len(buys)} SELL:{len(sells)} "
             f"HOLD:{len(avail_symbols)-len(buys)-len(sells)}"
         )
@@ -809,10 +904,7 @@ class TrendFilteredORB(Strategy):
 
     def _refresh_regime(self, symbol: str):
         try:
-            bars_5m  = self.get_historical_prices(symbol, 20, "5m")
-            # Only request multi-timeframe bars in live mode — in backtest mode
-            # only 5-min data exists; requesting 15m/1H causes LumiBot to try
-            # synthesizing from minutes with an enormous lookback that always fails.
+            bars_5m = self.get_historical_prices(symbol, 20, "5m")
             if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
                 bars_15m = None
                 bars_1h  = None
@@ -869,38 +961,13 @@ class TrendFilteredORB(Strategy):
         # BUY / STRONG_BUY  → allow LONG entry on ORB breakout  (full size)
         # HOLD              → allow LONG entry on ORB breakout  (half size via hold_override_size)
         # SELL / STRONG_SELL → block LONG entries; allow SHORT entry only
-        #
-        # Previous behavior blocked HOLD entirely unless hold_override=True.
-        # New behavior: HOLD is always eligible for a LONG ORB entry —
-        # hold_override_size (default 0.5) applies automatically to reduce
-        # the position size to reflect lower conviction.
-        # SELL bias still blocks LONG entries unconditionally.
         if want_short:
-            # SELL bias → only SHORT entries allowed, no LONG
             if direct:
                 return None  # No inverse ETF for direct-trade symbols
         elif not want_long and not hold_bias:
-            # Shouldn't happen, but guard against unknown action values
             return None
-        # want_long or hold_bias → proceed to LONG entry check below
 
         if want_short and direct:
-            return None
-        # max_positions check moved to caller — we return a scored candidate
-        # so the caller can rank all candidates and execute the best ones.
-
-        if want_long or hold_bias:
-            direction   = "LONG"
-            exec_ticker = pair["bull"]
-        else:
-            direction   = "SHORT"
-            exec_ticker = pair["bear"]
-
-        if direction == "LONG" and pair["bear"] in self._positions:
-            return None
-        if direction == "SHORT" and pair["bull"] in self._positions:
-            return None
-        if exec_ticker in self._positions:
             return None
 
         # ── Earnings filter ────────────────────────────────────────────────
@@ -1007,16 +1074,78 @@ class TrendFilteredORB(Strategy):
                        for _, r in df_today.iterrows()]
             avg_vol = float(df_today["volume"].mean()) if not df_today.empty else 1.0
             grading = grade_setup(
-                symbol=symbol, direction=direction, candles=candles,
+                symbol=symbol, direction=direction if not hold_bias else "LONG",
+                candles=candles,
                 or_high=state["or_high"], or_low=state["or_low"],
                 current_price=current, avg_volume=avg_vol,
             )
 
-        if not grading.get("approve", True):
+        ai_min = self.parameters.get("ai_min_confidence", 0.55)
+        if grading["confidence"] < ai_min or not grading.get("approve", True):
             self.log_message(
                 f"SKIP {symbol} — AI {grading['confidence']:.2f} | "
                 f"{grading.get('reasoning','')[:80]}"
             )
+            return None
+
+        # ── Swing mode: resolve ticker and enforce entry rules ──────────────
+        swing_mode = self.parameters.get("swing_mode", False)
+
+        if swing_mode:
+            from strategies.leverage_map import get_swing_ticker, is_leveraged_or_inverse
+
+            # Swing mode is LONG-only — block all SHORT entries
+            if want_short and not want_long:
+                self.log_message(
+                    f"[SWING] Skip SHORT {symbol} — inverse ETFs disabled in swing mode"
+                )
+                return None
+
+            # Resolve to the unleveraged underlying ticker
+            swing_ticker = get_swing_ticker(symbol)
+
+            # Safety net: if somehow we still got a leveraged ticker, abort
+            if is_leveraged_or_inverse(swing_ticker):
+                self.log_message(
+                    f"[SWING] ⚠️  Safety block — {swing_ticker} resolved as "
+                    f"leveraged/inverse, refusing entry for {symbol}"
+                )
+                return None
+
+            direction   = "LONG"
+            exec_ticker = swing_ticker
+
+            # Conviction preview gate — skip low-conviction setups before
+            # wasting AI grading calls (grading already happened above, so
+            # we use the grading confidence in the preview)
+            swing_min_conv = self.parameters.get("swing_min_conviction", 75)
+            preview_conviction = (
+                grading.get("confidence", 0.60) * 40
+                + bias.get("bull_score", 0) * 8
+                + min(bias.get("vol_ratio", 1.0) - 1.0, 1.0) * 10
+                + (10 if action in ("STRONG_BUY", "STRONG_SELL") else 0)
+            )
+            if preview_conviction < swing_min_conv:
+                self.log_message(
+                    f"[SWING] Skip {symbol} — conviction "
+                    f"{preview_conviction:.0f} < {swing_min_conv} threshold"
+                )
+                return None
+
+        else:
+            # Normal day-trading mode — use leveraged pair
+            if want_long or hold_bias:
+                direction   = "LONG"
+                exec_ticker = pair["bull"]
+            else:
+                direction   = "SHORT"
+                exec_ticker = pair["bear"]
+
+        if direction == "LONG" and pair["bear"] in self._positions:
+            return None
+        if direction == "SHORT" and pair["bull"] in self._positions:
+            return None
+        if exec_ticker in self._positions:
             return None
 
         # ── Dynamic sizing ─────────────────────────────────────────────────
@@ -1045,10 +1174,10 @@ class TrendFilteredORB(Strategy):
 
         # ── Conviction score for ranking ───────────────────────────────────
         # Higher = higher priority when max_positions would be exceeded.
-        bull_score = bias.get("bull_score", 0) if direction == "LONG" else bias.get("bear_score", 0)
-        vol_ratio  = bias.get("vol_ratio", 1.0)
+        bull_score   = bias.get("bull_score", 0) if direction == "LONG" else bias.get("bear_score", 0)
+        vol_ratio    = bias.get("vol_ratio", 1.0)
         action_bonus = 1 if action in ("STRONG_BUY", "STRONG_SELL") else 0
-        conviction = (
+        conviction   = (
             grading["confidence"] * 40        # 0–40  (AI confidence weighted highest)
             + bull_score * 8                  # 0–40  (signal strength)
             + min(vol_ratio - 1.0, 1.0) * 10  # 0–10  (volume confirmation, capped at 2x)
@@ -1059,20 +1188,18 @@ class TrendFilteredORB(Strategy):
         # Only applies when direction aligns with the pre-market signal
         if _PREMARKET_AVAILABLE:
             try:
-                pm_boost = premarket_conviction_boost(bias)
-                gap_signal = bias.get("gap_signal", "FLAT")
-                sentiment_signal = bias.get("sentiment_signal", "HOLD")
+                pm_boost          = premarket_conviction_boost(bias)
+                gap_signal        = bias.get("gap_signal", "FLAT")
+                sentiment_signal  = bias.get("sentiment_signal", "HOLD")
 
-                # Apply boost if pre-market agrees with our direction
-                gap_aligned  = (direction == "LONG" and gap_signal == "GAP_UP") or \
-                               (direction == "SHORT" and gap_signal == "GAP_DOWN")
+                gap_aligned = (direction == "LONG" and gap_signal == "GAP_UP") or \
+                              (direction == "SHORT" and gap_signal == "GAP_DOWN")
                 sentiment_aligned = (direction == "LONG" and sentiment_signal == "LONG") or \
-                               (direction == "SHORT" and sentiment_signal == "SHORT")
+                                    (direction == "SHORT" and sentiment_signal == "SHORT")
 
                 if gap_aligned or sentiment_aligned:
                     conviction += pm_boost
                 elif gap_signal != "FLAT" and not gap_aligned:
-                    # Gap is working against us — reduce conviction
                     conviction -= pm_boost * 0.5
             except Exception:
                 pass  # Never let boost calculation block a trade
@@ -1169,8 +1296,9 @@ class TrendFilteredORB(Strategy):
 
         tag   = "HOLD-BIAS " if hold_bias else ""
         o_tag = " [OVERNIGHT]" if overnight_eligible else " [EOD]"
+        swing_tag = " [SWING]" if self.parameters.get("swing_mode", False) else ""
         msg   = (
-            f"{tag}ENTRY {direction} | {symbol}→{exec_ticker} x{qty} "
+            f"{tag}ENTRY {direction}{swing_tag} | {symbol}→{exec_ticker} x{qty} "
             f"@ {current:.2f} | Stop:{c['initial_stop']:.2f} "
             f"Target:{c['initial_target']:.2f} | "
             f"AI:{grading['confidence']:.2f}({c['size_mult']:.1f}x) | "

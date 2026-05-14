@@ -4,14 +4,20 @@ ai_engine.py — AI-Powered Trade Analysis via Ollama
 Provides three capabilities:
   1. setup_grader:     Grades a breakout setup from OHLC candles (0.0–1.0 confidence)
   2. regime_detector:  Classifies market regime from multi-timeframe data
-  3. trade_narrator:   Generates a plain-English explanation of a trade for journaling
+  3. trade_narrator:   Generates a plain-English journal entry for a trade
 
 Uses Ollama running locally — no API key needed, no cost.
 Default model: qwen3:8b (fast, good reasoning)
 Fallback: returns neutral scores if Ollama is unreachable.
 
-Performance fix: Ollama is pre-warmed at startup, and per-call timeout
-is reduced to 15s so a slow/unresponsive Ollama doesn't block trade execution.
+Reliability fixes (v2):
+  - check_ollama_available() now warms up with a realistic regime-style
+    prompt instead of "Say OK." so the model's KV cache is primed before
+    the first real detect_regime() call fires.
+  - _call_ollama() retries up to MAX_RETRIES times with exponential backoff
+    (2s → 4s → 8s) before giving up and using fallback defaults.
+  - detect_regime() uses a longer per-call timeout (30s) than per-trade
+    grade_setup() calls (15s) since regime runs at open, not in the entry path.
 """
 
 import json
@@ -22,8 +28,12 @@ from typing import Optional
 # ── Config ─────────────────────────────────────────────────────────────────
 OLLAMA_URL   = "http://localhost:11434/api/generate"
 OLLAMA_TAGS  = "http://localhost:11434/api/tags"
-OLLAMA_MODEL = "qwen3:8b"
-TIMEOUT      = 15    # Reduced from 30 — don't block trades on slow Ollama
+OLLAMA_MODEL = "llama3.2:3b"   # was qwen3:8b
+TIMEOUT      = 15    # Per-trade timeout — don't block entry path on slow Ollama
+
+# Retry config — on timeout, retry this many times with exponential backoff
+# Set to 0 to disable retries (original behavior)
+MAX_RETRIES  = 2     # Total attempts = 1 + MAX_RETRIES = 3
 
 # Module-level flag: set to False if Ollama is confirmed unreachable
 _ollama_available = None   # None = not yet checked
@@ -32,8 +42,11 @@ _ollama_available = None   # None = not yet checked
 def check_ollama_available() -> bool:
     """
     Check if Ollama is running and the model is loaded.
-    Call this once at strategy startup (before_market_opens).
-    Warms up the model so the first real call is fast.
+    Called once in initialize() every time the bot starts.
+
+    Warms up with a realistic regime-style prompt (not just "Say OK.") so the
+    model's KV cache is primed before detect_regime() fires at market open.
+    If this warmup succeeds, the first real regime call will be fast.
     """
     global _ollama_available
     try:
@@ -57,20 +70,35 @@ def check_ollama_available() -> bool:
             _ollama_available = False
             return False
 
-        # Warm up — send a trivial prompt so model is loaded into memory
+        # Warm up with a realistic regime-style prompt.
+        # A trivial "Say OK." loads the model binary but leaves the KV cache
+        # cold — the first real regime call still has to build full context
+        # from scratch, causing the 15s timeout.
+        # Sending a regime-shaped prompt here primes the cache so that call
+        # is genuinely fast, not just "the model is running".
         print(f"[ai_engine] Warming up Ollama ({OLLAMA_MODEL})...")
+        warmup_prompt = (
+            "You are a quantitative analyst. Given this market data for QQQ: "
+            "5m bars show higher highs and higher lows, RSI=55, ATR=1.2. "
+            "Classify the regime as one of: trending_up, trending_down, "
+            "ranging, mean_reversion, volatile, low_liquidity. "
+            "Reply with ONLY this JSON: "
+            '{"regime":"trending_up","confidence":0.8,'
+            '"orb_suitability":"good","stop_adjustment":1.0,'
+            '"target_adjustment":1.0,"reasoning":"Warmup probe."}'
+        )
         warmup_resp = requests.post(
             OLLAMA_URL,
             json={
                 "model":  OLLAMA_MODEL,
-                "prompt": "Say OK.",
+                "prompt": warmup_prompt,
                 "stream": False,
-                "options": {"num_predict": 5, "temperature": 0},
+                "options": {"num_predict": 80, "temperature": 0},
             },
-            timeout=60,   # First load can take up to 60s
+            timeout=60,   # First load can take up to 60s — give it room
         )
         if warmup_resp.status_code == 200:
-            print(f"[ai_engine] Ollama ready — model loaded")
+            print(f"[ai_engine] Ollama ready — model loaded and warmed")
             _ollama_available = True
             return True
         else:
@@ -91,41 +119,68 @@ def check_ollama_available() -> bool:
         return False
 
 
-def _call_ollama(prompt: str, model: str = OLLAMA_MODEL) -> Optional[str]:
+def _call_ollama(prompt: str, model: str = OLLAMA_MODEL,
+                 timeout: int = None) -> Optional[str]:
     """
-    Raw call to Ollama.
+    Raw call to Ollama with automatic retry on timeout.
+
+    Retries up to MAX_RETRIES times with exponential backoff (2s, 4s, 8s).
+    Callers can override the timeout per-call (e.g. detect_regime uses 30s,
+    grade_setup uses the default 15s TIMEOUT).
+
     Skips immediately if Ollama was confirmed unavailable at startup.
-    Returns response text or None on failure.
+    Returns response text, or None if all attempts fail.
     """
     global _ollama_available
 
-    # If we already know Ollama is down, don't waste time trying
     if _ollama_available is False:
         return None
 
-    try:
-        resp = requests.post(
-            OLLAMA_URL,
-            json={
-                "model":  model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.1,
-                    "num_predict": 400,
-                }
-            },
-            timeout=TIMEOUT
-        )
-        if resp.status_code == 200:
-            _ollama_available = True   # Confirmed working
-            return resp.json().get("response", "").strip()
-        return None
-    except requests.exceptions.Timeout:
-        print(f"[ai_engine] Ollama timed out after {TIMEOUT}s — using fallback")
-        return None
-    except Exception:
-        return None
+    effective_timeout = timeout if timeout is not None else TIMEOUT
+
+    for attempt in range(1 + MAX_RETRIES):
+        try:
+            resp = requests.post(
+                OLLAMA_URL,
+                json={
+                    "model":  model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "num_predict": 400,
+                    }
+                },
+                timeout=effective_timeout
+            )
+            if resp.status_code == 200:
+                _ollama_available = True
+                if attempt > 0:
+                    print(f"[ai_engine] Ollama succeeded on retry {attempt}")
+                return resp.json().get("response", "").strip()
+            return None
+
+        except requests.exceptions.Timeout:
+            if attempt < MAX_RETRIES:
+                wait = 2 ** (attempt + 1)   # 2s, 4s, 8s
+                print(
+                    f"[ai_engine] Ollama timed out after {effective_timeout}s "
+                    f"(attempt {attempt + 1}/{1 + MAX_RETRIES}) — "
+                    f"retrying in {wait}s..."
+                )
+                time.sleep(wait)
+            else:
+                print(
+                    f"[ai_engine] Ollama timed out after {effective_timeout}s — "
+                    f"all {1 + MAX_RETRIES} attempts exhausted, using fallback"
+                )
+            continue
+
+        except Exception as e:
+            print(f"[ai_engine] Ollama call error: {e}")
+            return None
+
+    return None
 
 
 def _parse_json_from_response(text: str) -> dict:
@@ -143,7 +198,6 @@ def _parse_json_from_response(text: str) -> dict:
     # Strip markdown code fences
     if "```" in text:
         parts = text.split("```")
-        # Take the second part (inside fences)
         if len(parts) >= 2:
             text = parts[1]
             if text.startswith("json"):
@@ -197,6 +251,9 @@ def grade_setup(
     """
     Grade an ORB breakout setup. Returns confidence 0.0-1.0 and size multiplier.
 
+    Uses the default TIMEOUT (15s) — runs synchronously in the trade entry
+    path so speed matters. Retries via _call_ollama on timeout.
+
     If Ollama is unavailable, returns fallback with approve=True at 0.5x size
     so trades still execute but at reduced risk.
     """
@@ -242,7 +299,7 @@ Return ONLY this JSON (no other text, no markdown):
 
 Flags: coiling, parabolic, low_volume, strong_volume, momentum, choppy, overextended, tight_setup"""
 
-    response = _call_ollama(prompt)
+    response = _call_ollama(prompt)   # Uses default TIMEOUT (15s)
     data     = _parse_json_from_response(response)
 
     if not data or "confidence" not in data:
@@ -281,7 +338,14 @@ def detect_regime(
     rsi_14:   float,
     atr_14:   float,
 ) -> dict:
-    """Classify market regime. Returns fallback if Ollama unavailable."""
+    """
+    Classify market regime from multi-timeframe bar data.
+    Returns fallback if Ollama unavailable.
+
+    Uses timeout=30 (longer than per-trade grade_setup) because this runs
+    at market open and every 30 min — a few extra seconds here is acceptable,
+    and the larger multi-timeframe prompt needs more generation time.
+    """
 
     def fmt_bars(bars: list, label: str) -> str:
         if not bars:
@@ -315,7 +379,8 @@ Return ONLY this JSON (no markdown):
   "reasoning": "<2-3 sentences>"
 }}"""
 
-    response = _call_ollama(prompt)
+    # Regime calls get 60s — larger prompt, runs at open not in entry path
+    response = _call_ollama(prompt, timeout=60)
     data     = _parse_json_from_response(response)
 
     if not data or "regime" not in data:

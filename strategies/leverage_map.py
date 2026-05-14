@@ -16,6 +16,10 @@ Structure:
     }
 
 If a symbol is not in the map, the system trades the underlying directly (1x).
+
+Swing mode helpers (v2):
+    get_swing_ticker(symbol)       — always returns the unleveraged underlying
+    is_leveraged_or_inverse(ticker) — True if ticker is a 2x/3x or inverse ETF
 """
 
 LEVERAGE_MAP = {
@@ -175,7 +179,7 @@ LEVERAGE_MAP = {
     # ── Bitcoin / Crypto ──────────────────────────────────────────────────
     "IBIT": {
         "bull": "BITX",   # Volatility Shares 2x Bitcoin Strategy ETF
-        "bear": "BITI",   # ProShares Short Bitcoin ETF (inverse) — fixed from BITU
+        "bear": "BITI",   # ProShares Short Bitcoin ETF (inverse)
         "leverage": 2,
         "note": "Bitcoin 2x long / short"
     },
@@ -243,6 +247,12 @@ LEVERAGE_MAP = {
         "leverage": 1,
         "note": "Japan Value — no leveraged pair, trade direct"
     },
+    "EWY": {
+        "bull": "EWY",    # South Korea ETF — no leveraged pair
+        "bear": "EWY",
+        "leverage": 1,
+        "note": "South Korea ETF — no leveraged pair, trade direct"
+    },
 
     # ── Alternatives ──────────────────────────────────────────────────────
     "DBMF": {
@@ -287,3 +297,58 @@ def is_direct_trade(symbol: str) -> bool:
     """Returns True if bull == bear (no leveraged pair, trade direct)."""
     entry = get_leveraged_pair(symbol)
     return entry["bull"] == entry["bear"]
+
+
+def get_swing_ticker(signal_symbol: str) -> str:
+    """
+    Swing mode entry point — always returns the unleveraged underlying ticker.
+
+    Rules:
+      - If the symbol already trades direct (bull == bear in LEVERAGE_MAP),
+        return that ticker unchanged.
+      - If the symbol has a leveraged pair, return the signal_symbol itself
+        (the plain ETF, e.g. QQQ not TQQQ, SPY not SPXL).
+      - If the symbol is not in LEVERAGE_MAP at all, return it as-is
+        (it already trades direct by default).
+
+    This is the ONLY function swing mode uses to resolve execution tickers.
+    It never returns a 2x or 3x ETF, and never returns an inverse ETF.
+
+    Examples:
+        get_swing_ticker("QQQ")   → "QQQ"   (not TQQQ)
+        get_swing_ticker("SPY")   → "SPY"   (not SPXL)
+        get_swing_ticker("SMH")   → "SMH"   (not SOXL)
+        get_swing_ticker("RKLB")  → "RKLB"  (already direct)
+        get_swing_ticker("NVDA")  → "NVDA"  (not NVDL)
+    """
+    entry = LEVERAGE_MAP.get(signal_symbol)
+
+    if entry is None:
+        # Symbol not in map — trades direct by default
+        return signal_symbol
+
+    if entry["bull"] == entry["bear"]:
+        # Already a direct-trade symbol (e.g. RKLB, URA, REMX)
+        return entry["bull"]
+
+    # Has a leveraged pair — return the plain signal symbol (unleveraged)
+    return signal_symbol
+
+
+def is_leveraged_or_inverse(ticker: str) -> bool:
+    """
+    Returns True if a ticker is a leveraged (2x/3x) or inverse ETF.
+
+    Used by swing mode as a safety net to confirm get_swing_ticker() never
+    accidentally resolves to a leveraged product. In normal operation this
+    should never fire, but acts as a final guard before order submission.
+
+    Checks by scanning all bull/bear values in LEVERAGE_MAP where
+    bull != bear (i.e. entries that have a real leveraged pair).
+    """
+    leveraged_tickers: set = set()
+    for entry in LEVERAGE_MAP.values():
+        if entry["bull"] != entry["bear"]:
+            leveraged_tickers.add(entry["bull"])
+            leveraged_tickers.add(entry["bear"])
+    return ticker.upper() in leveraged_tickers

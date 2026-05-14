@@ -6,6 +6,13 @@ Full AI-enhanced pipeline:
   Morning ORB / Mean-Reversion → AI Grader → Regime Filter → Alpaca
 
 Switch paper/live: set ALPACA_IS_PAPER=true/false in .env
+
+Swing Mode: set SWING_MODE=true in .env for tax-efficient long-term holding.
+  - No leveraged ETFs (2x/3x) — trades underlying ETF directly
+  - No inverse/short ETFs — LONG only
+  - Entries only on high conviction (>= swing_min_conviction)
+  - SELLs throttled to once per swing_sell_cooldown_days UNLESS
+    all three force-sell gates fire simultaneously
 """
 
 import os
@@ -45,6 +52,41 @@ def main():
         "ai_min_confidence":  0.55,
         "hold_override":      False,
         "hold_override_size": 0.5,
+
+        # ── Swing / Tax-Efficient Mode ─────────────────────────────────────
+        # Set SWING_MODE=true in .env or flip swing_mode to True here.
+        # When active:
+        #   - No leveraged ETFs (2x/3x) — trades underlying ETF directly
+        #   - No inverse/short ETFs — LONG only
+        #   - Entries only on high conviction (>= swing_min_conviction)
+        #   - SELLs throttled to once per swing_sell_cooldown_days UNLESS
+        #     all three force-sell gates fire simultaneously (see below)
+        "swing_mode":                  os.getenv("SWING_MODE", "false").lower() == "true",
+
+        # Minimum conviction score (0–100) to allow a new entry in swing mode.
+        # Conviction = AI confidence (40pts) + bull_score (40pts)
+        #            + volume ratio (10pts) + STRONG bonus (10pts)
+        #            + pre-market boost
+        "swing_min_conviction":        75,
+
+        # Minimum days between routine SELL exits per symbol.
+        # After selling a symbol, the bot won't sell it again until this
+        # many days have passed — UNLESS the force-sell gates all fire.
+        "swing_sell_cooldown_days":    90,
+
+        # ── Force-sell override (bypasses cooldown) ────────────────────────
+        # ALL THREE of the following conditions must be true simultaneously
+        # to override the cooldown and force an early exit:
+        #
+        #   1. conviction >= swing_force_sell_conviction  (overall score)
+        #   2. bear_score >= swing_force_sell_bear_score  (signal engine)
+        #   3. action == "STRONG_SELL"                    (not just SELL)
+        #
+        # This triple-gate prevents false positives — a single indicator
+        # spiking is not enough; the AI, signal engine, and volume must all
+        # independently confirm a strong sell at the same time.
+        "swing_force_sell_conviction": 85,   # Overall conviction threshold
+        "swing_force_sell_bear_score": 5,    # signal_engine bear_score threshold
     }
 
     broker   = Alpaca(BROKER_CONFIG)
@@ -59,8 +101,9 @@ def main():
 
     mode = "📄 PAPER TRADING" if is_paper else "💰 LIVE TRADING ⚠️ REAL MONEY"
 
-    sentiment_url  = os.getenv("SENTIMENT_API_URL", "http://localhost:8000")
+    sentiment_url        = os.getenv("SENTIMENT_API_URL", "http://localhost:8000")
     sentiment_configured = bool(os.getenv("SENTIMENT_ADMIN_TOKEN", ""))
+    swing_mode           = PARAMS["swing_mode"]
 
     print("\n" + "=" * 70)
     print("  🚀  TREND-FILTERED ORB — AI-ENHANCED LIVE STRATEGY  v5")
@@ -71,9 +114,15 @@ def main():
     print(f"  Max Positions     : {PARAMS['max_positions']}")
     print(f"  AI Min Confidence : {PARAMS['ai_min_confidence']}")
     print(f"  HOLD Override     : {PARAMS['hold_override']}")
+    print(f"  Swing Mode        : {'✅ ON' if swing_mode else '❌ off'}")
+    if swing_mode:
+        print(f"  Swing Min Conv.   : {PARAMS['swing_min_conviction']}")
+        print(f"  Sell Cooldown     : {PARAMS['swing_sell_cooldown_days']}d")
+        print(f"  Force-Sell Conv.  : {PARAMS['swing_force_sell_conviction']}")
+        print(f"  Force-Sell Bear≥  : {PARAMS['swing_force_sell_bear_score']}")
     print(f"  Ollama Model      : qwen3:8b (localhost:11434)")
     print(f"  Trade Journal     : cache/trade_journal.db")
-    print(f"  Sentiment Alpha    : {sentiment_url} ({'token set ✅' if sentiment_configured else 'no token ⚠️'})")
+    print(f"  Sentiment Alpha   : {sentiment_url} ({'token set ✅' if sentiment_configured else 'no token ⚠️'})")
     print("=" * 70)
     print()
     print("  Daily schedule:")
@@ -88,7 +137,10 @@ def main():
     print("  • 4:15 PM ET      — FINAL signals run (official closing prices)")
     print("                      → Overwrites preliminary cache")
     print("                      → Any new SELL signals acted on")
-    print("  • Overnight        — Non-leveraged positions held until SELL signal")
+    if swing_mode:
+        print("  • Overnight        — All positions held (swing mode — no EOD close)")
+    else:
+        print("  • Overnight        — Non-leveraged positions held until SELL signal")
     print()
     print("  Off-hours: bot sleeps — no API calls, no log noise")
     print("  Active window: Mon–Fri 9:30 AM – 4:25 PM ET only")
