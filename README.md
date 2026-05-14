@@ -1,6 +1,6 @@
 # Trading Bot
 
-An AI-enhanced algorithmic trading system for US equities and leveraged ETFs. Combines momentum-based technical analysis with Opening Range Breakout (ORB) execution, filtered and sized by a local LLM running via Ollama.
+An AI-enhanced algorithmic trading system for US equities and leveraged ETFs. Combines momentum-based technical analysis with Opening Range Breakout (ORB) execution, filtered and sized by a local LLM running via Ollama. No cloud AI costs, no data leaving your machine.
 
 ---
 
@@ -11,8 +11,12 @@ An AI-enhanced algorithmic trading system for US equities and leveraged ETFs. Co
 - [Signal Pipeline](#signal-pipeline)
 - [AI Layer](#ai-layer)
 - [Regime-Based Strategy Switching](#regime-based-strategy-switching)
+- [Mean Reversion Strategy](#mean-reversion-strategy)
+- [Pre-Market Enrichment](#pre-market-enrichment)
+- [Signal Combiner](#signal-combiner)
 - [Earnings Calendar Filter](#earnings-calendar-filter)
 - [Trade Journal](#trade-journal)
+- [Dashboard](#dashboard)
 - [Project Structure](#project-structure)
 - [Leveraged ETF Map](#leveraged-etf-map)
 - [Setup](#setup)
@@ -33,7 +37,7 @@ An AI-enhanced algorithmic trading system for US equities and leveraged ETFs. Co
 This bot implements a two-stage trading approach:
 
 **Stage 1 — Afternoon technical signal (3:50 PM ET)**
-Scans all symbols in `symbols.txt` using EMA crossovers, RSI, MACD, and SMA200 to generate a directional bias (BUY / SELL / HOLD) for the next session. Results are persisted to `cache/daily_bias.json`.
+Scans all symbols in `symbols.txt` using EMA crossovers, RSI, MACD, and SMA200 to generate a directional bias (BUY / SELL / HOLD) for the next session. Results are persisted to `cache/daily_bias.json`. A second final pass runs at 4:15 PM using official closing prices, overwriting the preliminary cache with accurate end-of-day data.
 
 **Stage 2 — Morning execution (9:45 AM ET onward)**
 Waits for price to break above or below the first 15 minutes of trading. Only executes breakouts that align with the prior-day bias, then routes the trade to the highest-leverage ETF available for that signal symbol.
@@ -51,22 +55,37 @@ Every trade is recorded to a SQLite journal with full context for later analysis
 │              STARTUP (script launch)                    │
 │  Ollama warmup → model loaded into memory               │
 │  Bias cache loaded from cache/daily_bias.json           │
+│  Earnings cache pre-fetched for all symbols             │
+│  Sentiment Trading Alpha pipeline triggered (async)     │
 └──────────────────────────┬──────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────┐
-│           SIGNAL LAYER (3:50 PM ET daily)               │
+│           SIGNAL LAYER (3:50 PM + 4:15 PM ET)           │
 │  symbols.txt → signal_engine.py                         │
 │  EMA 2/3/5 crossover + RSI + MACD + SMA50/200           │
 │  → BUY / SELL / HOLD per symbol                         │
+│  3:50 PM → preliminary cache (prelim close prices)      │
+│  4:15 PM → final cache (official closing prices)        │
 │  → cache/daily_bias.json (persisted overnight)          │
 └──────────────────────────┬──────────────────────────────┘
                            │ prior-day bias
+┌──────────────────────────▼──────────────────────────────┐
+│     PRE-MARKET ENRICHMENT (~9:00 AM ET)                 │
+│  Gap analysis (Alpaca pre-market bars)                  │
+│  Alpaca News sentiment (keyword scoring, last 24h)      │
+│  Sentiment Trading Alpha (cached from async startup)    │
+│  → Enriched bias with gap_pct, news_sentiment,          │
+│    sentiment_signal, conviction boost score             │
+└──────────────────────────┬──────────────────────────────┘
+                           │ enriched bias
 ┌──────────────────────────▼──────────────────────────────┐
 │           EXECUTION LAYER (9:45 AM – noon)              │
 │  Morning ORB breakout detected                          │
 │  Bias check: does breakout align with prior-day signal? │
 │  Earnings filter: report within 48h? → skip             │
 │  leverage_map.py → route to highest-leverage ETF pair   │
+│  Candidates ranked by conviction score                  │
+│  Top N candidates executed (N = max_positions - open)   │
 └──────────────────────────┬──────────────────────────────┘
                            │ candidate trade
 ┌──────────────────────────▼──────────────────────────────┐
@@ -79,7 +98,7 @@ Every trade is recorded to a SQLite journal with full context for later analysis
 │       ├─ Volatile   → ORB entry at 0.75x size           │
 │       └─ Low liquid → Skip entirely                     │
 │                                                         │
-│  Setup grader → confidence 0.0–1.0 → size multiplier    │
+│  Setup grader → confidence 0.0–1.0 → size multiplier   │
 └──────────────────────────┬──────────────────────────────┘
                            │ sized order
 ┌──────────────────────────▼──────────────────────────────┐
@@ -89,6 +108,8 @@ Every trade is recorded to a SQLite journal with full context for later analysis
 │  Notifications → Email / Discord / Telegram             │
 │  Leveraged ETFs closed at 3:45 PM                       │
 │  Direct-trade symbols held overnight until SELL signal  │
+│  3:50 PM SELL signals acted on immediately              │
+│  4:15 PM SELL signals acted on from official close      │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -127,6 +148,13 @@ Runs on 400 days of daily bars from Alpaca. Computes:
 - EOD exit: leveraged ETFs always closed by 3:45 PM ET
 - Overnight: direct-trade (non-leveraged) symbols held until SELL signal
 
+### EOD Signal Timing (v5)
+
+| Time | Action |
+|---|---|
+| 3:50 PM ET | Preliminary signals run — SELL signals acted on immediately |
+| 4:15 PM ET | Final signals run using official close prices — overwrites preliminary cache, SELL signals acted on |
+
 ---
 
 ## AI Layer
@@ -146,8 +174,6 @@ Before each trade executes, the last 25 five-minute candles are passed to Ollama
 - Breakout extension (overextended = risky)
 - Candle body strength at the moment of breakout
 - Successive momentum bars in the breakout direction
-
-The AI call only fires for symbols where a breakout is actually detected — not all 40 symbols on every iteration.
 
 Returns a **confidence score (0.0–1.0)** mapped to position size:
 
@@ -179,7 +205,9 @@ Every 30 minutes during market hours, `detect_regime()` sends multi-timeframe ba
 | `volatile` | ORB at 0.75× size | No |
 | `low_liquidity` | Skipped entirely | No |
 
-### Mean-Reversion Logic (`strategies/mean_reversion_strategy.py`)
+---
+
+## Mean Reversion Strategy
 
 When the regime is `ranging` or `mean_reversion` with confidence ≥ 0.70:
 
@@ -192,6 +220,44 @@ When the regime is `ranging` or `mean_reversion` with confidence ≥ 0.70:
 
 ---
 
+## Pre-Market Enrichment
+
+Runs at ~9:00–9:15 AM ET via `strategies/premarket_signals.py`. Three signal sources enrich the daily bias before the ORB window opens:
+
+### 1. Gap Analysis
+- Fetches pre-market price vs prior close via Alpaca Data API
+- Computes `gap_pct`, `gap_vol_ratio`, `gap_signal` (GAP_UP / GAP_DOWN / FLAT)
+- ≥ 0.5% gap = directional signal; volume ratio amplifies conviction
+
+### 2. Alpaca News Sentiment
+- Pulls last 24h headlines from Alpaca News API (free with any Alpaca account)
+- Keyword scoring (positive/negative word lists) → sentiment score −1.0 to +1.0
+- Adds `news_sentiment` and `news_headline_count` to bias
+
+### 3. Sentiment Trading Alpha
+- Optional integration with [Jeff's Sentiment Trading Alpha](https://github.com/techjeffe/Sentiment-Trading-Alpha)
+- Triggered as background thread at startup — result cached by 9:45 AM
+- Adds `sentiment_signal` (LONG/SHORT/HOLD), `sentiment_confidence`, `sentiment_conviction`
+- Fails silently if server is offline — bot continues without it
+
+### Conviction Boost
+`premarket_conviction_boost()` scores up to +25 points when gap, news, and sentiment all align with the trade direction. Negative gap (working against trade) subtracts points.
+
+---
+
+## Signal Combiner
+
+`strategies/signal_combiner.py` fuses technical and sentiment signals:
+
+| Agreement | Result |
+|---|---|
+| `CONFIRMED` | Both agree — boosted confidence |
+| `TECHNICAL_ONLY` | Sentiment neutral — technical leads |
+| `SENTIMENT_ONLY` | Technicals neutral — sentiment leads |
+| `CONFLICT` | Directional disagreement — trade skipped |
+
+---
+
 ## Earnings Calendar Filter
 
 `strategies/earnings_filter.py` uses Yahoo Finance (free, no API key) to check the next earnings date for each symbol before entry.
@@ -199,9 +265,8 @@ When the regime is `ranging` or `mean_reversion` with confidence ≥ 0.70:
 - Blocks new positions within **48 hours** of a scheduled earnings report
 - Results cached per symbol per day — only one Yahoo Finance call per symbol per session
 - Cache cleared each morning in `before_market_opens()`
-- **Fails open**: if the calendar cannot be fetched, the trade proceeds rather than blocking silently
-
-Why this matters: leveraged ETFs (3× especially) can gap 20–30%+ overnight on earnings. A stop loss set intraday provides no protection against an overnight gap.
+- Pre-fetched for all symbols at startup to avoid latency during the ORB window
+- **Fails open**: if the calendar cannot be fetched, the trade proceeds
 
 ---
 
@@ -219,14 +284,14 @@ Every trade is recorded to **`cache/trade_journal.db`** (SQLite). Schema capture
 | Risk | initial stop, initial target, risk %, planned R |
 | Exit | time, price, reason (STOP / TARGET / EOD / SELL_SIGNAL / MANUAL) |
 | Outcome | P&L, P&L %, R-multiple, WIN / LOSS / BREAKEVEN |
-| Context | VIX level hook, SPY trend, sentiment score (ready for Jeff's bot) |
+| Context | VIX level hook, SPY trend, sentiment score, sentiment signal |
 | Narrative | AI-generated plain-English journal entry |
 
 **View performance stats:**
 ```python
 from strategies.trade_journal import TradeJournal
 stats = TradeJournal().get_stats(days=30)
-# Returns: win rate, P&L, profit factor, Sharpe, by regime/symbol/AI tier
+# Returns: win rate, P&L, profit factor, avg R, by regime/symbol/AI tier
 ```
 
 **Export to CSV:**
@@ -235,6 +300,22 @@ TradeJournal().export_csv("my_trades.csv")
 ```
 
 Browse the database visually with [DB Browser for SQLite](https://sqlitebrowser.org/) (free).
+
+---
+
+## Dashboard
+
+A real-time web dashboard runs alongside the bot on `http://localhost:5001`.
+
+**Pages:**
+- **Overview** — Bias summary, open positions, equity curve, recent trades
+- **Signals** — Full bias table with gap %, news sentiment, Sentiment Alpha columns, filterable by BUY/SELL/HOLD
+- **Positions** — Live positions from Alpaca with stop, target, AI confidence, regime
+- **Trade Log** — Full history filterable by result (WIN/LOSS) and direction (LONG/SHORT)
+- **Performance** — Stats by period (7d/30d/60d/90d/1y), by symbol, by regime, daily P&L chart
+- **Regime** — Latest regime readings per symbol with confidence and reasoning
+
+Launch via `start_bot.bat` — opens both the bot and dashboard automatically.
 
 ---
 
@@ -250,6 +331,7 @@ trading-bot/
 │   ├── leverage_map.py              # Symbol → leveraged ETF pair registry
 │   ├── mean_reversion_strategy.py   # Mean-reversion fade logic for ranging regimes
 │   ├── orb_strategy.py              # Base ORB strategy (LumiBot, backtest + live)
+│   ├── premarket_signals.py         # Gap analysis, Alpaca News, Sentiment Alpha
 │   ├── signal_combiner.py           # Combines technical + sentiment signals
 │   ├── signal_engine.py             # EMA/RSI/MACD technical signal generator
 │   ├── trade_journal.py             # SQLite trade journaling and stats
@@ -261,12 +343,14 @@ trading-bot/
 │   └── orb.py                       # ORB signal for standalone alert scripts
 │
 ├── runners/                         # Entry points for backtesting and live trading
+│   ├── dashboard_server.py          # FastAPI dashboard server (port 5001)
 │   ├── run_backtest_combined.py     # ORB backtest with Polygon intraday data
 │   ├── run_backtest_ema.py          # EMA crossover backtest (Yahoo daily data)
 │   ├── run_backtest_orb.py          # ORB backtest (Yahoo, ~30 day limit)
 │   ├── run_live_combined.py         # ★ Main live runner — starts TrendFilteredORB
 │   ├── run_live_ema.py              # EMA strategy live runner
-│   └── run_live_orb.py              # ORB-only live runner
+│   ├── run_live_orb.py              # ORB-only live runner
+│   └── clear_backtest_trades.py     # Utility: remove backtest artifacts from journal
 │
 ├── alerts/                          # Standalone daily alert scripts
 │   ├── run_orb_check.py             # 9:45 AM — morning ORB breakout report
@@ -285,7 +369,9 @@ trading-bot/
 ├── logs/                            # Signal and execution logs (gitignored)
 │   └── daily_signals.log
 │
+├── dashboard.html                   # Dashboard frontend (served by dashboard_server.py)
 ├── symbols.txt                      # Master symbol list (one ticker per line)
+├── start_bot.bat                    # One-click Windows launcher
 ├── setup.py                         # Package installation (pip install -e .)
 ├── requirements.txt                 # Python dependencies
 └── .env                             # API keys — never commit this file
@@ -295,7 +381,7 @@ trading-bot/
 
 ## Leveraged ETF Map
 
-`strategies/leverage_map.py` maps each signal symbol to its highest-available leveraged ETF pair. The bot reads signals from the underlying (e.g. SMH) but executes in the leveraged vehicle (e.g. SOXL/SOXS).
+`strategies/leverage_map.py` maps each signal symbol to its highest-available leveraged ETF pair.
 
 | Signal Symbol | Bull ETF | Bear ETF | Leverage | Notes |
 |---|---|---|---|---|
@@ -312,8 +398,6 @@ trading-bot/
 | JPM | FAS | FAZ | 3× | Financials |
 | NANR | ERX | ERY | 2× | Energy/natural resources |
 | UFO / RKLB / URA / URNM / EWT / EWJV / DBMF / GRID / CEG / REMX / DBC | direct | direct | 1× | No quality leveraged pair |
-
-Symbols with no liquid leveraged ETF trade the underlying directly. SHORT entries are automatically skipped for direct-trade symbols since there is no inverse ETF.
 
 ---
 
@@ -341,6 +425,7 @@ venv\Scripts\activate          # Windows
 pip install --upgrade pip
 pip install lumibot pandas numpy python-dotenv yfinance pandas-ta
 pip install alpaca-trade-api alpaca-py requests polygon-api-client pytz
+pip install fastapi uvicorn   # Required for dashboard
 
 # Install project as editable package (fixes all import paths)
 pip install -e .
@@ -351,7 +436,7 @@ ollama pull qwen3:8b
 
 ### Environment Variables
 
-Create `.env` in the project root. **Never commit this file.**
+Create `.env` in the project root (use `example.env` as a template). **Never commit `.env`.**
 
 ```env
 # Alpaca — set ALPACA_IS_PAPER=false for live trading
@@ -362,7 +447,13 @@ ALPACA_IS_PAPER=true
 # Polygon.io — only needed for intraday backtesting
 POLYGON_API_KEY=your_polygon_key_here
 
+# Sentiment Trading Alpha (optional)
+SENTIMENT_API_URL=http://localhost:8000
+SENTIMENT_ADMIN_TOKEN=your_token_here
+
 # Email notifications (optional)
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
 EMAIL_SENDER=your_email@gmail.com
 EMAIL_PASSWORD=your_app_password
 EMAIL_RECIPIENT=your_email@gmail.com
@@ -383,16 +474,6 @@ TELEGRAM_CHAT_ID=your_chat_id
 
 One ticker per line. Lines starting with `#` are ignored.
 
-```
-# Broad market
-SPY
-QQQ
-
-# Semiconductors
-SMH
-NVDA
-```
-
 ### Strategy Parameters (`runners/run_live_combined.py`)
 
 ```python
@@ -402,14 +483,14 @@ PARAMS = {
     "risk_pct":                 0.01,   # Base risk per trade (1% of portfolio)
     "reward_ratio":             2.0,    # 2:1 reward:risk target
     "eod_exit_time":            "15:45",
-    "max_positions":            5,      # Max simultaneous open positions
+    "max_positions":            8,      # Max simultaneous open positions
     "ai_min_confidence":        0.55,   # Skip trades below this AI score
-    "hold_override":            False,  # Trade HOLD-bias symbols (not recommended)
-    "hold_override_size":       0.5,    # Size multiplier if hold_override=True
-    "earnings_filter_enabled":  True,   # Skip entries near earnings
-    "earnings_buffer_hours":    48,     # Hours before earnings to block entry
-    "regime_switching_enabled": True,   # Use mean-reversion in ranging markets
-    "mean_reversion_min_conf":  0.70,   # Min regime confidence for MR entries
+    "hold_override":            False,  # Trade HOLD-bias symbols (half size)
+    "hold_override_size":       0.5,    # Size multiplier for HOLD-bias trades
+    "earnings_filter_enabled":  True,
+    "earnings_buffer_hours":    48,
+    "regime_switching_enabled": True,
+    "mean_reversion_min_conf":  0.70,
 }
 ```
 
@@ -424,58 +505,51 @@ TIMEOUT      = 15            # Seconds before falling back to defaults
 
 ## Running the Bot
 
-### 1. Start Ollama
+### Quick Start (Windows)
+
+Double-click **`start_bot.bat`** — it activates the venv, starts both the trading bot and dashboard, and opens your browser automatically.
+
+### Manual Start
 
 ```bash
+# 1. Start Ollama
 ollama serve
-```
 
-### 2. Run the Live Strategy
-
-```bash
+# 2. Activate venv and run
 cd trading-bot
 venv\Scripts\activate
 python runners\run_live_combined.py
 ```
 
-**What happens on startup and throughout the day:**
+**Daily schedule:**
 
 | Time | Action |
 |---|---|
-| Script launch | Ollama warmup — model loaded into memory immediately |
-| `before_market_opens` (~9:00 AM) | Earnings cache cleared, regime pre-warmed, signals run if no cache |
-| 9:30 AM | Position sync from Alpaca (overnight positions reconciled) |
+| Script launch | Ollama warmup, earnings cache prefetch, Sentiment Alpha async trigger |
+| `before_market_opens` (~9:00 AM) | Earnings cache cleared, regime pre-warmed, pre-market enrichment (gaps + news + sentiment) |
+| 9:30 AM | Position sync from Alpaca |
 | 9:30 AM onward | Overnight positions checked against SELL signals |
-| 9:45 AM – noon | ORB / mean-reversion entries attempted per symbol |
-| Every 30 min | Regime classification refreshed for QQQ |
+| 9:45 AM – noon | ORB / mean-reversion entries |
+| Every 30 min | Regime classification refreshed |
 | Every 5 min | Open positions monitored for stop/target hits |
 | 3:45 PM | All leveraged ETF positions closed |
-| 3:50 PM | EOD signals run, bias cached for tomorrow |
-| Overnight | Non-leveraged positions held until next SELL signal |
+| 3:50 PM | Preliminary EOD signals — SELL signals acted on immediately |
+| 4:15 PM | Final EOD signals (official close) — overwrites cache, SELL signals acted on |
+| Overnight | Non-leveraged positions held until SELL signal |
 
-### 3. Switch to Live Trading
+### Switch to Live Trading
 
-Set `ALPACA_IS_PAPER=false` in `.env`. Validate paper trading performance for at least 30–60 days first.
+Set `ALPACA_IS_PAPER=false` in `.env`. Paper trade for at least 30–60 days first.
 
 ---
 
 ## Alert Scripts
 
-These run independently — useful for manual monitoring or Windows Task Scheduler.
-
-### Morning ORB Check (`alerts/run_orb_check.py`)
-
-Run at 9:45–9:56 AM ET after the opening range has formed. Reports BUY / SELL / WAIT for every symbol and sends via email, Discord, Telegram.
-
 ```bash
+# Morning ORB check — run at 9:45 AM ET
 python alerts\run_orb_check.py
-```
 
-### EOD Technical Signals (`alerts/run_technical_signals.py`)
-
-Run at 3:50 PM ET. Single-pass scan — results are used for both the printed output and writing `cache/daily_bias.json`. Running this manually also populates the bias cache for the next day even if the live bot wasn't running.
-
-```bash
+# EOD technical signals — run at 3:50 PM ET
 python alerts\run_technical_signals.py
 ```
 
@@ -490,23 +564,25 @@ python alerts\run_technical_signals.py
 
 ## Backtesting
 
-### EMA Crossover Strategy (Yahoo Finance, free)
-
+### EMA Crossover (Yahoo Finance, free)
 ```bash
 python runners\run_backtest_ema.py
 ```
+3-year backtest (2022–2025). Outputs equity curve, Sharpe, max drawdown vs QQQ benchmark.
 
-3-year backtest (2022–2025) including the 2022 bear market. Outputs equity curve, Sharpe ratio, max drawdown, and win rate vs QQQ buy-and-hold benchmark.
+### ORB Base Strategy (Polygon.io)
+```bash
+python runners\run_backtest_orb.py
+```
+Baseline without AI/regime filter — useful for comparison.
 
-### ORB Strategy (Polygon.io intraday data)
-
+### TrendFilteredORB Full Pipeline (Polygon.io)
 ```bash
 python runners\run_backtest_combined.py
 ```
+First run: ~5–10 min (Polygon fetch). Subsequent runs: instant from cache. AI/regime detection skipped in backtest for speed; uses simplified signal logic instead.
 
-Fetches 5-minute bars from Polygon for QQQ, TQQQ, SQQQ. First run takes 30–60 minutes due to the free-tier rate limit (5 requests/minute). Data is cached — subsequent runs load instantly.
-
-Configure the date range in `runners/run_backtest_combined.py`:
+Configure date range in `runners/run_backtest_combined.py`:
 ```python
 START = datetime(2024, 7, 1)
 END   = datetime(2025, 7, 1)
@@ -516,15 +592,13 @@ END   = datetime(2025, 7, 1)
 
 ## Notifications
 
-All three channels are optional. Configure credentials in `.env`.
-
 | Channel | Setup |
 |---|---|
 | **Email** | Gmail App Password (requires 2FA), or any SMTP server |
 | **Discord** | Webhook URL from Server Settings → Integrations |
 | **Telegram** | Bot token from @BotFather, chat ID from @userinfobot |
 
-Notifications fire on: trade entry, trade exit (with P&L), EOD signal summary, and critical errors.
+Fires on: trade entry, trade exit (with P&L), EOD signal summary, critical errors.
 
 ---
 
@@ -544,39 +618,33 @@ Default `symbols.txt` covers 40 symbols across multiple sectors:
 - **International:** EWT, EWY, EWJV
 - **Alternatives:** DBMF, GRID, CEG, JPM
 
-Add or remove symbols freely. New symbols not in `leverage_map.py` trade the underlying directly at 1×.
-
 ---
 
 ## Risk Management
 
 **Position level:**
-- Maximum 5 simultaneous open positions (configurable)
+- Maximum 8 simultaneous open positions (configurable)
 - Base risk 1% of portfolio per trade
 - AI confidence scales size 0.5×–2.0× (hard cap 2% effective risk)
 - Stop loss at OR midpoint for ORB entries
 - Leveraged ETFs always closed by 3:45 PM ET
 - Direct-trade symbols held overnight until SELL signal or stop hit
+- HOLD-bias trades: half size by default
 
 **Safety guards:**
 - Never SHORT a symbol with no inverse ETF
-- Never hold opposing bull+bear ETFs for the same underlying simultaneously
-- ORB entries only taken once per symbol per day
+- Never hold opposing bull+bear ETFs simultaneously
+- ORB entries only once per symbol per day
 - No new entries after noon
 - Low liquidity regime → skip entirely
 - Earnings within 48 hours → skip
 - AI confidence below 0.55 → skip
 - Mean-reversion entries capped at 0.75× base risk
+- Market hours guard: bot sleeps outside Mon–Fri 9:30 AM – 4:25 PM ET
 
 ---
 
 ## Future Enhancements
-
-### Integration with Sentiment Trading Alpha
-
-This bot is designed to integrate with **[Sentiment Trading Alpha](https://github.com/techjeffe/Sentiment-Trading-Alpha)** by Jeff Jeffe as a complementary signal layer. The `sentiment_score` and `sentiment_signal` fields are already present in the trade journal schema, ready for population once integration is built.
-
-The planned combined architecture:
 
 ```
 ┌────────────────────┐     ┌──────────────────────────────┐
@@ -592,7 +660,7 @@ The planned combined architecture:
             │    Signal Agreement    │
             │    Confidence Ranking  │
             └──────────┬────────────┘
-                       │
+                       ▼
         ┌──────────────┼──────────────┐
         ▼              ▼              ▼
   Regime Engine   Capitol Trades  Volatility
@@ -600,39 +668,25 @@ The planned combined architecture:
                    Signals)
         └──────────────┼──────────────┘
                        ▼
-               Final Probability Score
-                       ▼
-               Dynamic Position Sizing
-                       ▼
-                Alpaca Execution
+               Final Probability Score → Dynamic Position Sizing → Alpaca
 ```
 
-### Planned Roadmap
-
 **Near-term:**
-- [ ] Capitol Trades ingestion — congressional trade disclosures as additional signal source
-- [ ] Backtest TrendFilteredORB with earnings filter and regime switching enabled
-- [ ] Per-symbol regime detection (currently uses QQQ as proxy for all symbols)
-- [ ] Cloud deployment — Oracle Cloud free tier ARM instance
+- [ ] Capitol Trades ingestion — congressional disclosure signals
+- [ ] Per-symbol regime detection (currently QQQ proxy for all)
+- [ ] Backtest TrendFilteredORB with earnings filter + regime switching enabled
+- [ ] Cloud deployment — Oracle Cloud free tier ARM
 
 **Medium-term:**
-- [ ] Jeff's Sentiment Trading Alpha integration — geopolitical RSS signal layer
-- [ ] Wheel strategy module — cash-secured puts on high-conviction names
-- [ ] tastytrade broker support for options execution
+- [ ] Full Sentiment Trading Alpha integration
+- [ ] Wheel strategy module (cash-secured puts)
+- [ ] tastytrade broker support for options
 - [ ] Options flow data as confirmation signal
 
 **Long-term:**
-- [ ] ML model trained on `trade_journal.db` to replace/augment the LLM grader
-- [ ] Multi-broker support (tastytrade options, IBKR international)
+- [ ] ML model trained on `trade_journal.db` to replace/augment LLM grader
+- [ ] Multi-broker support (tastytrade, IBKR)
 - [ ] Portfolio-level risk management (sector concentration, correlation-adjusted sizing)
-
----
-
-## Disclaimer
-
-This software is for **educational and research purposes only**. It is not financial advice. Automated trading involves substantial risk of loss. Past performance does not guarantee future results. Leveraged and inverse ETFs can lose value rapidly and are not suitable for all investors.
-
-Always paper trade first. Never risk capital you cannot afford to lose. The authors take no responsibility for trading losses incurred using this software.
 
 ---
 
@@ -643,12 +697,21 @@ Always paper trade first. Never risk capital you cannot afford to lose. The auth
 | `lumibot` | Backtesting framework and live broker abstraction |
 | `alpaca-py` | Alpaca broker API |
 | `alpaca-trade-api` | Legacy Alpaca API (required by LumiBot) |
-| `pandas` / `numpy` | Data manipulation and computation |
+| `pandas` / `numpy` | Data manipulation |
 | `pandas-ta` | Technical indicators |
-| `yfinance` | Yahoo Finance data (backtesting + earnings calendar) |
-| `polygon-api-client` | Polygon.io intraday data for ORB backtesting |
+| `yfinance` | Yahoo Finance data + earnings calendar |
+| `polygon-api-client` | Polygon.io intraday data for backtesting |
 | `python-dotenv` | Environment variable management |
 | `requests` | HTTP client for Ollama API calls |
 | `pytz` | Timezone handling |
+| `fastapi` / `uvicorn` | Dashboard API server |
 
-Python 3.12 required. Python 3.13 and 3.14 not supported due to `numba` constraints in LumiBot.
+Python 3.12 required. Python 3.13 and 3.14 not supported (numba/LumiBot constraint).
+
+---
+
+## Disclaimer
+
+This software is for **educational and research purposes only**. It is not financial advice. Automated trading involves substantial risk of loss. Past performance does not guarantee future results. Leveraged and inverse ETFs can lose value rapidly and are not suitable for all investors.
+
+Always paper trade first. Never risk capital you cannot afford to lose.
