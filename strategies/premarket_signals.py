@@ -57,11 +57,6 @@ def get_premarket_gaps(symbols: list[str], api_key: str, api_secret: str) -> dic
         "gap_vol_ratio": float,   # pre-market vol vs 20d avg
         "gap_signal":    str,     # "GAP_UP" | "GAP_DOWN" | "FLAT"
       }
-
-    Gaps are calculated from the most recent extended-hours bar (4:00–9:30 AM)
-    vs the prior regular-hours close.
-
-    Requires free Alpaca Data API (Unlimited plan not required — IEX feed works).
     """
     if not api_key or not api_secret:
         return {}
@@ -72,7 +67,6 @@ def get_premarket_gaps(symbols: list[str], api_key: str, api_secret: str) -> dic
 
     for symbol in symbols:
         try:
-            # ── Fetch last 30 days of daily bars for average pre-market vol ──
             end   = now_et.strftime("%Y-%m-%d")
             start = (now_et - timedelta(days=30)).strftime("%Y-%m-%d")
 
@@ -90,7 +84,6 @@ def get_premarket_gaps(symbols: list[str], api_key: str, api_secret: str) -> dic
 
             prior_close = float(daily_bars[-1]["c"])
 
-            # ── Fetch today's pre-market bars (4:00 AM – 9:30 AM) ────────────
             today = now_et.strftime("%Y-%m-%dT04:00:00-05:00")
             now_s = now_et.strftime("%Y-%m-%dT%H:%M:%S%z")
 
@@ -112,8 +105,6 @@ def get_premarket_gaps(symbols: list[str], api_key: str, api_secret: str) -> dic
             pm_price  = float(pm_bars[-1]["c"])
             pm_volume = sum(float(b["v"]) for b in pm_bars)
 
-            # Average pre-market volume: use ~30% of daily avg as proxy
-            # (proper pre-market avg would require historical extended-hours data)
             daily_avg_vol = (
                 sum(float(b["v"]) for b in daily_bars) / len(daily_bars)
                 if daily_bars else 1.0
@@ -136,8 +127,7 @@ def get_premarket_gaps(symbols: list[str], api_key: str, api_secret: str) -> dic
                 "gap_signal":    signal,
             }
 
-        except Exception as e:
-            # Fail gracefully per symbol — don't block startup
+        except Exception:
             pass
 
     return results
@@ -148,16 +138,11 @@ def get_premarket_gaps(symbols: list[str], api_key: str, api_secret: str) -> dic
 def get_alpaca_news_sentiment(symbols: list[str], api_key: str, api_secret: str) -> dict:
     """
     Pull recent headlines from Alpaca News API and score sentiment per symbol.
-    Uses simple keyword scoring — no additional LLM calls needed.
-
     Returns dict keyed by symbol:
       {
         "news_sentiment":      float,  # -1.0 to +1.0
         "news_headline_count": int,
       }
-
-    Alpaca News API: free with any Alpaca account, no extra plan required.
-    Endpoint: GET /v1beta1/news?symbols=QQQ,SPY&limit=50
     """
     if not api_key or not api_secret:
         return {}
@@ -165,7 +150,6 @@ def get_alpaca_news_sentiment(symbols: list[str], api_key: str, api_secret: str)
     headers = {"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": api_secret}
     results = {}
 
-    # Positive/negative keyword lists for quick scoring
     POSITIVE = [
         "beat", "beats", "record", "surge", "rally", "upgrade", "buyout",
         "bullish", "growth", "profit", "earnings beat", "raises guidance",
@@ -179,8 +163,7 @@ def get_alpaca_news_sentiment(symbols: list[str], api_key: str, api_secret: str)
         "tariff", "sanction", "investigation", "fraud", "default",
     ]
 
-    # Fetch in one batch call — Alpaca accepts comma-separated symbols
-    symbols_str = ",".join(symbols[:10])  # API limit
+    symbols_str = ",".join(symbols[:10])
     since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
@@ -196,7 +179,6 @@ def get_alpaca_news_sentiment(symbols: list[str], api_key: str, api_secret: str)
     except Exception:
         return {}
 
-    # Group articles by symbol and score
     symbol_articles: dict[str, list] = {s: [] for s in symbols}
     for article in articles:
         for sym in article.get("symbols", []):
@@ -235,7 +217,6 @@ def get_alpaca_news_sentiment(symbols: list[str], api_key: str, api_secret: str)
 
 # ── 3. Sentiment-Trading-Alpha integration ─────────────────────────────
 
-# Cache the last response so we don't hammer his server
 _sentiment_cache: dict = {}
 _sentiment_cache_time: Optional[datetime] = None
 _sentiment_lock = threading.Lock()
@@ -248,14 +229,6 @@ def _fetch_sentiment_signal(symbols: list[str]) -> Optional[dict]:
     """
     if not SENTIMENT_BASE:
         return None
-
-    # Sentiment-Trading-Alpha TradingSignal output schema (from schemas/analysis.py):
-    #   signal_type:      "LONG" | "SHORT" | "HOLD"
-    #   confidence_score: 0.0–1.0
-    #   conviction_level: "HIGH" | "MEDIUM" | "LOW"
-    #   recommendations:  list of per-symbol dicts with:
-    #     underlying_symbol, action ("BUY"|"SELL"), symbol (execution ticker),
-    #     leverage ("1x"|"2x"|"3x"), size_pct, directional_score
 
     headers = {"Content-Type": "application/json"}
     if SENTIMENT_TOKEN:
@@ -271,12 +244,11 @@ def _fetch_sentiment_signal(symbols: list[str]) -> Optional[dict]:
             f"{SENTIMENT_BASE}/analyze",
             json=payload,
             headers=headers,
-            timeout=120,   # Pipeline takes 30–120s for LLM inference
+            timeout=120,
         )
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError:
-        # Sentiment-Trading-Alpha server isn't running — skip silently
         return None
     except Exception as e:
         print(f"[premarket] Sentiment-Trading-Alpha API error: {e}")
@@ -286,26 +258,25 @@ def _fetch_sentiment_signal(symbols: list[str]) -> Optional[dict]:
 def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dict:
     """
     Get per-symbol sentiment from Sentiment-Trading-Alpha bot.
-    Results are cached for SENTIMENT_MAX_AGE_MINUTES so we don't re-run the
-    full LLM pipeline on every call.
+    Results are cached for SENTIMENT_MAX_AGE_MINUTES.
 
     Returns dict keyed by symbol:
       {
         "sentiment_signal":      str,   "LONG" | "SHORT" | "HOLD"
         "sentiment_confidence":  float, 0.0–1.0
         "sentiment_conviction":  str,   "HIGH" | "MEDIUM" | "LOW"
-        "sentiment_directional": float, -1.0 to +1.0 (from directional_score)
+        "sentiment_directional": float, -1.0 to +1.0
       }
     """
     global _sentiment_cache, _sentiment_cache_time
 
     with _sentiment_lock:
-        # Use cache if fresh enough
+        # Use cache if fresh enough — fixed: use total_seconds() not .seconds
         if (
             not force_refresh
             and _sentiment_cache
             and _sentiment_cache_time is not None
-            and (datetime.now(timezone.utc) - _sentiment_cache_time).seconds
+            and (datetime.now(timezone.utc) - _sentiment_cache_time).total_seconds()
                 < SENTIMENT_MAX_AGE_MINUTES * 60
         ):
             return _sentiment_cache
@@ -323,7 +294,6 @@ def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dic
         confidence  = float(trading_signal.get("confidence_score", 0.0))
         conviction  = trading_signal.get("conviction_level", "LOW").upper()
 
-        # Build per-symbol results from the recommendations list
         recommendations = trading_signal.get("recommendations") or []
         rec_map = {
             str(r.get("underlying_symbol", r.get("symbol", "")) or "").upper(): r
@@ -335,10 +305,8 @@ def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dic
             rec       = rec_map.get(sym_upper, {})
             sent      = sentiment_scores.get(sym_upper, {})
 
-            # Per-symbol directional score from sentiment_scores if available
             directional = float(sent.get("directional_score", 0.0) if sent else 0.0)
 
-            # Per-symbol action from recommendations, fallback to portfolio signal
             action = str(rec.get("action", "") or "").upper()
             if action == "BUY":
                 sym_signal = "LONG"
@@ -368,14 +336,12 @@ def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dic
 def trigger_sentiment_async(symbols: list[str]):
     """
     Fire Sentiment-Trading-Alpha pipeline in a background thread so it doesn't block startup.
-    By the time the ORB window opens (~9:45 AM), the result will be cached.
-    If the server is offline the thread exits silently — the bot continues without it.
     """
     def _run():
         try:
             get_sentiment_signal(symbols, force_refresh=True)
         except Exception:
-            pass  # Server offline or any other error — silent, bot continues unaffected
+            pass
 
     t = threading.Thread(target=_run, daemon=True, name="sentiment-alpha-bg")
     t.start()
@@ -393,23 +359,11 @@ def enrich_bias(
     """
     Main entry point. Enriches a daily_bias dict in-place with pre-market
     gap data, Alpaca news sentiment, and (optionally) Sentiment-Trading-Alpha LLM sentiment.
-
-    Call from trend_filtered_orb.py → before_market_opens() or startup_refresh().
-
-    Args:
-        bias:       Current daily_bias dict (modified in place, also returned)
-        api_key:    Alpaca API key
-        api_secret: Alpaca API secret
-        run_sentiment:   If True, use cached sentiment result (doesn't re-trigger pipeline)
-
-    Returns:
-        Enriched bias dict (same object as input)
     """
     symbols = list(bias.keys())
     if not symbols:
         return bias
 
-    # ── Gap analysis ──────────────────────────────────────────────────────────
     print(f"[premarket] Running gap analysis for {len(symbols)} symbols...")
     gaps = get_premarket_gaps(symbols, api_key, api_secret)
     gap_up   = [s for s, g in gaps.items() if g.get("gap_signal") == "GAP_UP"]
@@ -419,7 +373,6 @@ def enrich_bias(
         f"{len(symbols)-len(gap_up)-len(gap_down)} flat"
     )
 
-    # ── Alpaca News ───────────────────────────────────────────────────────────
     print(f"[premarket] Fetching Alpaca news sentiment...")
     news = get_alpaca_news_sentiment(symbols, api_key, api_secret)
     positive_news = [s for s, n in news.items() if n.get("news_sentiment", 0) > 0.2]
@@ -429,7 +382,6 @@ def enrich_bias(
         f"{len(negative_news)} negative"
     )
 
-    # ── Sentiment-Trading-Alpha (from cache — trigger_sentiment_async() runs the pipeline) ─
     sentiment = {}
     if run_sentiment:
         try:
@@ -447,7 +399,6 @@ def enrich_bias(
         else:
             print("[premarket] Sentiment-Trading-Alpha: unavailable — continuing without it")
 
-    # ── Merge into bias ───────────────────────────────────────────────────────
     for symbol in symbols:
         entry = bias.get(symbol, {})
         if gaps.get(symbol):
@@ -461,47 +412,31 @@ def enrich_bias(
     return bias
 
 
-# ── Conviction boost helper (used in _process_symbol) ─────────────────────────
+# ── Conviction boost helper ────────────────────────────────────────────────────
 
 def premarket_conviction_boost(bias_entry: dict) -> float:
     """
     Calculate a conviction boost (0–25 points) from pre-market signals.
-    Added to the base conviction score in _process_symbol.
-
-    Scoring:
-      Gap up + high pre-market volume    →  up to +10 pts
-      Positive news sentiment            →  up to +8  pts
-      Sentiment LONG signal (HIGH conviction) →  up to +7  pts
-
-    Negative signals subtract the same amounts for SHORT trades,
-    but this function returns the absolute boost value — the caller
-    decides whether to apply it positively (LONG) or negatively (SHORT).
     """
     boost = 0.0
 
-    # Gap contribution
     gap_pct       = abs(float(bias_entry.get("gap_pct", 0.0) or 0.0))
     gap_vol_ratio = float(bias_entry.get("gap_vol_ratio", 1.0) or 1.0)
     gap_signal    = bias_entry.get("gap_signal", "FLAT")
 
     if gap_signal != "FLAT":
-        # Scale: +2 per 0.5% gap, max 8 pts
         gap_score = min(gap_pct / 0.5 * 2, 8.0)
-        # Volume multiplier: up to 1.25x if vol_ratio > 2
         vol_mult = min(gap_vol_ratio / 2.0, 1.25) if gap_vol_ratio > 1.0 else 0.8
         boost += gap_score * vol_mult
 
-    # News sentiment contribution
     news_score = float(bias_entry.get("news_sentiment", 0.0) or 0.0)
     news_count = int(bias_entry.get("news_headline_count", 0) or 0)
     if news_count > 0:
-        # Scale: 0.5 pt per 0.1 sentiment, max 8 pts, weighted by article count
         count_weight = min(news_count / 5.0, 1.5)
         boost += min(abs(news_score) / 0.1 * 0.5, 8.0) * count_weight
 
-    # Sentiment-Trading-Alpha conviction contribution
-    sentiment_signal    = bias_entry.get("sentiment_signal", "HOLD")
-    sentiment_conf      = float(bias_entry.get("sentiment_confidence", 0.0) or 0.0)
+    sentiment_signal     = bias_entry.get("sentiment_signal", "HOLD")
+    sentiment_conf       = float(bias_entry.get("sentiment_confidence", 0.0) or 0.0)
     sentiment_conviction = bias_entry.get("sentiment_conviction", "LOW")
 
     if sentiment_signal in ("LONG", "SHORT"):

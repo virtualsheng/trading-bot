@@ -22,7 +22,7 @@ def get_price_data(
             client = StockHistoricalDataClient(api_key, secret_key)
             end = datetime.now(pytz.UTC)
             start = end - timedelta(days=days + 2)
-            
+
             request = StockBarsRequest(
                 symbol_or_symbols=symbol,
                 timeframe=timeframe,
@@ -31,7 +31,7 @@ def get_price_data(
                 adjustment="all",
                 feed="iex"
             )
-            
+
             bars = client.get_stock_bars(request)
             if bars and len(bars.df) > 0:
                 df = bars.df.reset_index()
@@ -39,17 +39,16 @@ def get_price_data(
                 df = df.set_index("timestamp")
                 df.index = df.index.tz_convert("US/Eastern")
                 return df
-        except:
-            pass  # fallback to yfinance
+        except Exception as e:
+            print(f"Alpaca fetch failed for {symbol}: {e} — falling back to yfinance")
 
     # yfinance fallback
     try:
         if timeframe == TimeFrame.Day:
-            # FIX: Fetch 1m data for the last 2 days to ensure today's "live" price is included
-            # This is crucial for the 3:50 PM signal accuracy.
+            # Fetch daily bars + today's intraday to get latest close
             hist = yf.download(symbol, period=f"{days+5}d", interval="1d", progress=False)
             live_data = yf.download(symbol, period="1d", interval="1m", progress=False, prepost=True)
-            
+
             if not live_data.empty:
                 # Resample 1m data into a single daily row for today
                 today_bar = live_data.resample('D').agg({
@@ -59,7 +58,7 @@ def get_price_data(
                     'Close': 'last',
                     'Volume': 'sum'
                 }).dropna()
-                
+
                 # Update or append today's bar to history
                 df = pd.concat([hist[~hist.index.isin(today_bar.index)], today_bar])
             else:
@@ -67,18 +66,18 @@ def get_price_data(
         else:
             interval = "5m"
             df = yf.download(symbol, period=f"{days+5}d", interval=interval, progress=False, prepost=True)
-        
+
         if df.empty:
-            raise ValueError("No data")
-            
+            raise ValueError(f"No data returned for {symbol}")
+
         df = df.rename(columns={'Open':'open','High':'high','Low':'low','Close':'close','Volume':'volume'})
         df.index = pd.to_datetime(df.index)
         if df.index.tz is None:
             df.index = df.index.tz_localize("US/Eastern")
         else:
             df.index = df.index.tz_convert("US/Eastern")
-            
+
         return df
     except Exception as e:
-        print(f"Error fetching data for {symbol}: {e}")
+        print(f"yfinance fetch failed for {symbol}: {e}")
         return pd.DataFrame()

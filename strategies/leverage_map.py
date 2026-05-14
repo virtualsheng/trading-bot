@@ -175,9 +175,9 @@ LEVERAGE_MAP = {
     # ── Bitcoin / Crypto ──────────────────────────────────────────────────
     "IBIT": {
         "bull": "BITX",   # Volatility Shares 2x Bitcoin Strategy ETF
-        "bear": "BITU",   # ProShares Ultra Bitcoin 2x (use as inverse signal)
+        "bear": "BITI",   # ProShares Short Bitcoin ETF (inverse) — fixed from BITU
         "leverage": 2,
-        "note": "Bitcoin 2x"
+        "note": "Bitcoin 2x long / short"
     },
 
     # ── Financials ────────────────────────────────────────────────────────

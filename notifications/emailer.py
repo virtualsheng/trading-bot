@@ -1,4 +1,3 @@
-
 import os
 import smtplib
 
@@ -32,21 +31,18 @@ def send_email(subject, body):
 
     msg.attach(MIMEText(body, "plain"))
 
-    server = smtplib.SMTP(
-        smtp_server,
-        smtp_port
-    )
-
-    server.starttls()
-
-    server.login(sender, password)
-
-    server.sendmail(
-        sender,
-        recipient,
-        msg.as_string()
-    )
-
-    server.quit()
-
-    print("Email sent")
+    server = None
+    try:
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.starttls()
+        server.login(sender, password)
+        server.sendmail(sender, recipient, msg.as_string())
+        print("Email sent")
+    except Exception as e:
+        print(f"Email error: {e}")
+    finally:
+        if server:
+            try:
+                server.quit()
+            except Exception:
+                pass

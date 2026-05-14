@@ -18,12 +18,20 @@ Usage:
 """
 
 import datetime
-import functools
+import pytz
 from typing import Optional
 
 # Cache earnings dates per symbol per day to avoid repeated yfinance calls
 # Format: {"NVDA": {"fetched": date, "next_earnings": date_or_None}}
 _earnings_cache: dict = {}
+
+# Use ET timezone consistently so cache date matches trading day
+_ET = pytz.timezone("US/Eastern")
+
+
+def _today_et() -> datetime.date:
+    """Return today's date in US/Eastern time."""
+    return datetime.datetime.now(_ET).date()
 
 
 def _get_next_earnings_date(symbol: str) -> Optional[datetime.date]:
@@ -41,7 +49,7 @@ def _get_next_earnings_date(symbol: str) -> Optional[datetime.date]:
         if cal is None or cal.empty:
             return None
 
-        today = datetime.date.today()
+        today = _today_et()
         # Filter to future dates only (including today)
         future = cal[cal.index.date >= today]  # type: ignore
         if future.empty:
@@ -73,7 +81,7 @@ def is_earnings_safe(
     buffer_hours : hours before earnings to block new entries (default 48)
     use_cache    : use cached result if fetched today (avoids repeated yfinance calls)
     """
-    today = datetime.date.today()
+    today = _today_et()
 
     # Check cache
     if use_cache and symbol in _earnings_cache:
@@ -82,8 +90,9 @@ def is_earnings_safe(
             next_earnings = cached["next_earnings"]
             if next_earnings is None:
                 return True  # No upcoming earnings
-            delta = datetime.datetime.combine(next_earnings, datetime.time(16, 0))
-            delta = delta - datetime.datetime.now()
+            now_et = datetime.datetime.now(_ET).replace(tzinfo=None)
+            earnings_dt = datetime.datetime.combine(next_earnings, datetime.time(16, 0))
+            delta = earnings_dt - now_et
             return delta.total_seconds() > buffer_hours * 3600
 
     # Fetch fresh
@@ -99,16 +108,15 @@ def is_earnings_safe(
         return True  # No earnings data = safe to trade
 
     # Calculate hours until earnings (assume 4pm ET report time)
+    now_et = datetime.datetime.now(_ET).replace(tzinfo=None)
     earnings_dt = datetime.datetime.combine(next_earnings, datetime.time(16, 0))
-    hours_until  = (earnings_dt - datetime.datetime.now()).total_seconds() / 3600
+    hours_until = (earnings_dt - now_et).total_seconds() / 3600
 
     if hours_until < 0:
         # Earnings was today/already passed — check if within 4 hours after
-        # (sometimes earnings are announced pre-market the next morning)
         return abs(hours_until) > 4
 
     safe = hours_until > buffer_hours
-
     return safe
 
 
@@ -117,14 +125,14 @@ def get_earnings_info(symbol: str) -> dict:
     Return earnings calendar info for a symbol.
     Useful for logging/debugging.
     """
-    today = datetime.date.today()
     next_earnings = _get_next_earnings_date(symbol)
 
     if next_earnings is None:
         return {"symbol": symbol, "next_earnings": None, "hours_until": None, "safe": True}
 
-    earnings_dt  = datetime.datetime.combine(next_earnings, datetime.time(16, 0))
-    hours_until  = (earnings_dt - datetime.datetime.now()).total_seconds() / 3600
+    now_et = datetime.datetime.now(_ET).replace(tzinfo=None)
+    earnings_dt = datetime.datetime.combine(next_earnings, datetime.time(16, 0))
+    hours_until = (earnings_dt - now_et).total_seconds() / 3600
 
     return {
         "symbol":        symbol,
@@ -146,16 +154,11 @@ def prefetch_earnings(symbols: list):
     Fires _get_next_earnings_date() for each symbol so the results are
     cached before the first trade check, avoiding per-symbol fetch latency
     during the ORB window.
-
-    yfinance prints "No earnings dates found" for every ETF (which is most
-    of the watchlist). We suppress stdout during prefetch to avoid startup
-    noise — the filter still works correctly regardless.
     """
     import sys, io
     upcoming = []
     for symbol in symbols:
         try:
-            # Suppress yfinance's verbose ETF warnings during bulk prefetch
             _stdout = sys.stdout
             sys.stdout = io.StringIO()
             date = _get_next_earnings_date(symbol)
@@ -163,8 +166,10 @@ def prefetch_earnings(symbols: list):
             if date:
                 upcoming.append(f"{symbol}:{date}")
         except Exception:
-            try: sys.stdout = _stdout
-            except: pass
+            try:
+                sys.stdout = _stdout
+            except Exception:
+                pass
 
     if upcoming:
         print(f"[startup] Earnings alerts: {', '.join(upcoming)}")

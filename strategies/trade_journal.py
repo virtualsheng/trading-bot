@@ -360,6 +360,13 @@ class TradeJournal:
         gross_win  = sum(t["pnl"] for t in wins)
         gross_loss = abs(sum(t["pnl"] for t in losses))
 
+        # ── Guard against empty or all-null r_multiple list ───────────────
+        r_vals = [t["r_multiple"] for t in trades
+                  if t.get("r_multiple") is not None
+                  and not (isinstance(t["r_multiple"], float) and
+                           t["r_multiple"] != t["r_multiple"])]  # NaN check
+        avg_r = round(float(np.mean(r_vals)), 2) if r_vals else 0.0
+
         return {
             "total_trades":   len(trades),
             "wins":           len(wins),
@@ -368,8 +375,8 @@ class TradeJournal:
             "total_pnl":      round(sum(pnls), 2),
             "avg_win":        round(gross_win / len(wins), 2)    if wins   else 0,
             "avg_loss":       round(gross_loss / len(losses), 2) if losses else 0,
-            "profit_factor":  round(gross_win / gross_loss, 2)   if gross_loss > 0 else float("inf"),
-            "avg_r_multiple": round(float(np.mean([t["r_multiple"] for t in trades if t["r_multiple"]])), 2),
+            "profit_factor":  round(gross_win / gross_loss, 2)   if gross_loss > 0 else None,
+            "avg_r_multiple": avg_r,
             "by_regime":      self._group_by(trades, "regime"),
             "by_symbol":      self._group_by(trades, "symbol"),
             "by_ai_tier":     self._group_by_ai_tier(trades),

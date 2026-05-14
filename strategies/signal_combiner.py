@@ -53,8 +53,7 @@ from __future__ import annotations
 def adapt_sentiment_signal(raw_sentiment: dict) -> dict:
     """
     Normalize Jeff's Sentiment Trading Alpha output into the schema
-    this combiner expects. Update this function once his output format
-    is confirmed.
+    this combiner expects.
 
     Expected Jeff output (based on repo structure — verify and update):
       {
@@ -64,12 +63,9 @@ def adapt_sentiment_signal(raw_sentiment: dict) -> dict:
         "source": str,
       }
     """
-    # TODO: Update field names once Jeff's output schema is confirmed.
-    # Current mapping is a reasonable guess based on his repo structure.
     raw_action = raw_sentiment.get("signal", raw_sentiment.get("action", "neutral"))
     raw_score  = raw_sentiment.get("score",  raw_sentiment.get("confidence", 0))
 
-    # Normalize action
     action_map = {
         "bullish": "BUY",
         "bearish": "SELL",
@@ -80,11 +76,14 @@ def adapt_sentiment_signal(raw_sentiment: dict) -> dict:
     }
     action = action_map.get(str(raw_action).lower(), "HOLD")
 
-    # Normalize score → 0–100 int
+    # Normalize score → 0–100 int, clamped to 99 max
     if isinstance(raw_score, float) and raw_score <= 1.0:
         confidence = int(raw_score * 100)
     else:
         confidence = int(raw_score)
+
+    # Clamp to valid range
+    confidence = max(0, min(confidence, 99))
 
     return {
         "action":     action,
@@ -98,8 +97,6 @@ def adapt_sentiment_signal(raw_sentiment: dict) -> dict:
 def _technical_strength(signal: dict) -> str:
     """
     Derive a STRONG / MODERATE / WEAK label from signal_engine output.
-    signal_engine doesn't return a 'strength' key — we derive it from
-    bull_score/bear_score and volume_ratio.
     """
     action     = signal.get("action", "HOLD")
     vol_ratio  = signal.get("volume_ratio", 1.0) or 1.0
@@ -140,7 +137,6 @@ def combine_signals(
         sentiment_signal:   Raw output from Jeff's bot (pre-adaptation), or
                             already-adapted dict, or None if not available.
         ai_min_confidence:  Minimum confidence (0.0–1.0) to set execute=True.
-                            Should match TrendFilteredORB's ai_min_confidence param.
 
     Returns:
         Combined signal dict (see module docstring for schema).
@@ -149,13 +145,11 @@ def combine_signals(
     t_action     = _normalize_technical_action(t_action_raw)
     t_strength   = _technical_strength(technical_signal)
 
-    # Base confidence from technical signal alone (0–100)
     strength_confidence = {"STRONG": 80, "MODERATE": 65, "WEAK": 40}
     t_confidence = strength_confidence[t_strength]
 
     # ── Sentiment available ────────────────────────────────────────────────────
     if sentiment_signal is not None:
-        # Accept either raw (Jeff's format) or pre-adapted
         if "confidence" not in sentiment_signal or "action" not in sentiment_signal:
             adapted = adapt_sentiment_signal(sentiment_signal)
         else:
@@ -177,17 +171,16 @@ def combine_signals(
                 f"sentiment={s_action} ({s_confidence}% confidence)"
             )
         elif t_action == "HOLD" and s_action != "HOLD":
-            combined_confidence = s_confidence
+            combined_confidence = min(s_confidence, 99)
             combined_action     = s_action
             agreement           = "SENTIMENT_ONLY"
             reason = f"Sentiment leads ({s_action} {s_confidence}%), technicals neutral"
         elif s_action == "HOLD" and t_action != "HOLD":
-            combined_confidence = t_confidence
+            combined_confidence = min(t_confidence, 99)
             combined_action     = t_action
             agreement           = "TECHNICAL_ONLY"
             reason = f"Technicals lead ({t_action_raw} {t_strength}), sentiment neutral"
         else:
-            # Directional conflict → stand down
             combined_confidence = 0
             combined_action     = "HOLD"
             agreement           = "CONFLICT"
@@ -198,11 +191,10 @@ def combine_signals(
         s_action     = "HOLD"
         s_source     = "none"
         combined_action     = t_action
-        combined_confidence = t_confidence
+        combined_confidence = min(t_confidence, 99)
         agreement           = "TECHNICAL_ONLY"
         reason = f"No sentiment signal — technical only: {t_action_raw} ({t_strength})"
 
-    # Convert confidence to 0.0–1.0 for comparison against ai_min_confidence
     confidence_normalized = combined_confidence / 100.0
 
     execute = (
@@ -213,8 +205,8 @@ def combine_signals(
 
     return {
         "action":             combined_action,
-        "confidence":         combined_confidence,           # 0–100 int
-        "confidence_float":   round(confidence_normalized, 3),  # 0.0–1.0
+        "confidence":         combined_confidence,
+        "confidence_float":   round(confidence_normalized, 3),
         "agreement":          agreement,
         "execute":            execute,
         "technical_action":   t_action_raw,
@@ -228,7 +220,6 @@ def combine_signals(
 # ── Quick test ─────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Simulate signal_engine output
     tech = {
         "action":       "STRONG_BUY",
         "bull_score":   5,
@@ -238,7 +229,6 @@ if __name__ == "__main__":
         "above_sma200": True,
     }
 
-    # Simulate Jeff's sentiment output
     sentiment_raw = {
         "ticker": "QQQ",
         "signal": "bullish",
