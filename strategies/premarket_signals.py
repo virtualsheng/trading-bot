@@ -7,27 +7,42 @@ Three signal sources that run at startup / before_market_opens():
   2. Alpaca News         — headline sentiment via Alpaca News API (free, same key)
   3. Sentiment-Trading-Alpha — directional score from Sentiment-Trading-Alpha REST API
 
-Each source returns a per-symbol dict that is merged into the daily bias
-by enrich_bias() in trend_filtered_orb.py.
+Sentiment-Trading-Alpha API (from source code analysis of techjeffe/Sentiment-Trading-Alpha):
+─────────────────────────────────────────────────────────────────────────────────────────────
+  Endpoint:  POST /api/v1/analyze
+  Base URL:  SENTIMENT_API_URL env var (default: http://localhost:8000)
+  Auth:      X-Admin-Token header (SENTIMENT_ADMIN_TOKEN env var, optional)
 
-Sentiment endpoint configuration
-─────────────────────────────────
-The endpoint PATH is configurable via .env so you don't have to edit code
-when you find the correct route from http://localhost:8000/docs:
+  Request body (AnalysisRequest schema):
+    {
+      "symbols":          ["SPY", "QQQ", ...],   # required, list of tickers
+      "max_posts":        50,                     # optional, 1–200, default 50
+      "include_backtest": false,                  # optional, skip backtest for speed
+      "lookback_days":    14                      # optional, 7–30, default 14
+    }
 
-  SENTIMENT_API_URL=http://localhost:8000      ← base URL (existing)
-  SENTIMENT_ENDPOINT=/analyze                  ← path (new, default /analyze)
+  Response body (AnalysisResponse schema) — key fields we use:
+    trading_signal:
+      signal_type:       "LONG" | "SHORT" | "HOLD"
+      confidence_score:  0.0–1.0
+      conviction_level:  "HIGH" | "MEDIUM" | "LOW"
+      recommendations:   [ { underlying_symbol, symbol, action, thesis, ... }, ... ]
+    sentiment_scores:
+      { "<SYMBOL>": { directional_score: -1.0–1.0, confidence: 0.0–1.0, ... }, ... }
 
-If /analyze returns 404, set SENTIMENT_ENDPOINT to the correct path, e.g.:
-  SENTIMENT_ENDPOINT=/api/analyze
-  SENTIMENT_ENDPOINT=/v1/analyze
-  SENTIMENT_ENDPOINT=/signal
+  The `recommendations` list contains per-symbol entries where:
+    underlying_symbol = signal symbol (e.g. "QQQ")
+    symbol            = execution ticker (e.g. "TQQQ")
+    action            = "BUY" | "SELL"
+    thesis            = "LONG" | "SHORT"
+
+  Note: include_backtest=false is important — backtesting adds 30–60s to the
+  response time and we don't need it here. We just need the trading signal.
 """
 
 from __future__ import annotations
 
 import os
-import time
 import threading
 import requests
 from datetime import datetime, timedelta, timezone
@@ -38,11 +53,15 @@ from typing import Optional
 ALPACA_BASE      = "https://data.alpaca.markets"
 ALPACA_NEWS_BASE = "https://data.alpaca.markets/v1beta1"
 
-SENTIMENT_BASE     = os.getenv("SENTIMENT_API_URL",   "http://localhost:8000")
-SENTIMENT_ENDPOINT = os.getenv("SENTIMENT_ENDPOINT",  "/analyze")
-SENTIMENT_TOKEN    = os.getenv("SENTIMENT_ADMIN_TOKEN", "")
+SENTIMENT_BASE  = os.getenv("SENTIMENT_API_URL",   "http://localhost:8000")
+SENTIMENT_TOKEN = os.getenv("SENTIMENT_ADMIN_TOKEN", "")
 
-# How stale Sentiment-Trading-Alpha is allowed to be before re-fetching (minutes)
+# Full endpoint path confirmed from Sentiment-Trading-Alpha source:
+# main.py: app.include_router(analysis_router, prefix="/api/v1")
+# routers/analysis.py: router.post("/analyze") → full path = /api/v1/analyze
+SENTIMENT_ANALYZE_URL = f"{SENTIMENT_BASE}/api/v1/analyze"
+
+# How stale the cache is allowed to be before re-fetching (minutes)
 SENTIMENT_MAX_AGE_MINUTES = 90
 
 _sentiment_cache:      dict                = {}
@@ -54,7 +73,7 @@ _sentiment_lock = threading.Lock()
 
 def get_premarket_gaps(symbols: list[str], api_key: str, api_secret: str) -> dict:
     """
-    Fetch pre-market price and volume for each symbol via Alpaca's data API.
+    Fetch pre-market price vs prior close for each symbol via Alpaca Data API.
     Returns per-symbol dict with gap_pct, gap_signal, gap_vol_ratio.
     """
     results = {}
@@ -65,7 +84,6 @@ def get_premarket_gaps(symbols: list[str], api_key: str, api_secret: str) -> dic
 
     for symbol in symbols:
         try:
-            # Prior close
             resp = requests.get(
                 f"{ALPACA_BASE}/v2/stocks/{symbol}/bars",
                 params={"timeframe": "1Day", "limit": 2, "adjustment": "raw"},
@@ -78,13 +96,12 @@ def get_premarket_gaps(symbols: list[str], api_key: str, api_secret: str) -> dic
                 continue
             prior_close = float(bars[-1]["c"])
 
-            # Pre-market quote
             quote_resp = requests.get(
                 f"{ALPACA_BASE}/v2/stocks/{symbol}/quotes/latest",
                 headers=headers,
                 timeout=10,
             )
-            quote = quote_resp.json().get("quote", {})
+            quote     = quote_resp.json().get("quote", {})
             pre_price = float(quote.get("ap", 0) or quote.get("bp", 0) or prior_close)
 
             gap_pct = ((pre_price - prior_close) / prior_close * 100) if prior_close else 0.0
@@ -156,7 +173,7 @@ def get_alpaca_news_sentiment(symbols: list[str], api_key: str, api_secret: str)
 
             avg_score = sum(scores) / len(scores) if scores else 0.0
             results[symbol] = {
-                "news_sentiment":     round(avg_score, 3),
+                "news_sentiment":      round(avg_score, 3),
                 "news_headline_count": len(news),
             }
         except Exception:
@@ -169,36 +186,52 @@ def get_alpaca_news_sentiment(symbols: list[str], api_key: str, api_secret: str)
 
 def _fetch_sentiment_signal(symbols: list[str]) -> Optional[dict]:
     """
-    Call Sentiment-Trading-Alpha and return the raw JSON response.
+    Call POST /api/v1/analyze on the Sentiment-Trading-Alpha backend.
 
-    The endpoint path is read from SENTIMENT_ENDPOINT env var (default /analyze).
-    If you get a 404, browse to http://localhost:8000/docs to find the correct
-    route, then set SENTIMENT_ENDPOINT in your .env file.
+    Request schema (AnalysisRequest):
+      symbols:          list of ticker strings (required)
+      max_posts:        50 (enough for signal quality, fast enough for pre-market)
+      include_backtest: false (skip — adds 30–60s we don't need)
+      lookback_days:    14 (default rolling window)
 
-    Returns None if the server is unreachable, token is missing, or any error.
+    Auth: X-Admin-Token header if SENTIMENT_ADMIN_TOKEN is set.
+
+    Returns the raw AnalysisResponse JSON dict, or None on any failure.
     """
     if not SENTIMENT_BASE:
         return None
-
-    url = f"{SENTIMENT_BASE}{SENTIMENT_ENDPOINT}"
 
     headers = {"Content-Type": "application/json"}
     if SENTIMENT_TOKEN:
         headers["X-Admin-Token"] = SENTIMENT_TOKEN
 
     payload = {
-        "symbols":      [s.upper() for s in symbols],
-        "risk_profile": "aggressive",
+        "symbols":          [s.upper() for s in symbols],
+        "max_posts":        50,
+        "include_backtest": False,   # skip backtest — we only need the signal
+        "lookback_days":    14,
     }
 
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=120)
+        resp = requests.post(
+            SENTIMENT_ANALYZE_URL,
+            json=payload,
+            headers=headers,
+            timeout=120,   # analysis pipeline can take 60–90s on first run
+        )
 
         if resp.status_code == 404:
             print(
-                f"[premarket] Sentiment-Trading-Alpha 404 at {url}\n"
-                f"           Browse http://localhost:8000/docs to find the correct path,\n"
-                f"           then set SENTIMENT_ENDPOINT=/correct/path in your .env"
+                f"[premarket] Sentiment-Trading-Alpha 404 at {SENTIMENT_ANALYZE_URL}\n"
+                f"           Verify the backend is running: python run.py (in the STA directory)\n"
+                f"           Expected URL: http://localhost:8000/api/v1/analyze"
+            )
+            return None
+
+        if resp.status_code == 401 or resp.status_code == 403:
+            print(
+                f"[premarket] Sentiment-Trading-Alpha auth error ({resp.status_code}) — "
+                f"check SENTIMENT_ADMIN_TOKEN in .env"
             )
             return None
 
@@ -206,9 +239,10 @@ def _fetch_sentiment_signal(symbols: list[str]) -> Optional[dict]:
         return resp.json()
 
     except requests.exceptions.ConnectionError:
+        # Server not running — fail silently, bot continues without it
         return None
-    except requests.exceptions.HTTPError as e:
-        print(f"[premarket] Sentiment-Trading-Alpha HTTP error: {e}")
+    except requests.exceptions.Timeout:
+        print("[premarket] Sentiment-Trading-Alpha timed out after 120s — skipping")
         return None
     except Exception as e:
         print(f"[premarket] Sentiment-Trading-Alpha API error: {e}")
@@ -217,16 +251,14 @@ def _fetch_sentiment_signal(symbols: list[str]) -> Optional[dict]:
 
 def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dict:
     """
-    Get per-symbol sentiment from Sentiment-Trading-Alpha bot.
+    Get per-symbol sentiment from Sentiment-Trading-Alpha.
     Results are cached for SENTIMENT_MAX_AGE_MINUTES.
 
-    Returns dict keyed by symbol:
-      {
-        "sentiment_signal":      str,   "LONG" | "SHORT" | "HOLD"
-        "sentiment_confidence":  float, 0.0–1.0
-        "sentiment_conviction":  str,   "HIGH" | "MEDIUM" | "LOW"
-        "sentiment_directional": float, -1.0 to +1.0
-      }
+    Maps AnalysisResponse fields to our internal schema:
+      sentiment_signal:      "LONG" | "SHORT" | "HOLD"   (from trading_signal.signal_type or per-symbol recommendation)
+      sentiment_confidence:  float 0.0–1.0               (from trading_signal.confidence_score)
+      sentiment_conviction:  "HIGH" | "MEDIUM" | "LOW"   (from trading_signal.conviction_level)
+      sentiment_directional: float -1.0 to +1.0          (from sentiment_scores[symbol].directional_score)
     """
     global _sentiment_cache, _sentiment_cache_time
 
@@ -247,27 +279,38 @@ def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dic
             print("[premarket] Sentiment-Trading-Alpha: unavailable — continuing without it")
             return {}
 
-        results        = {}
-        trading_signal = raw.get("trading_signal") or {}
+        # ── Parse AnalysisResponse ──────────────────────────────────────────
+        trading_signal   = raw.get("trading_signal") or {}
         sentiment_scores = raw.get("sentiment_scores") or {}
-        signal_type    = trading_signal.get("signal_type", "HOLD").upper()
-        confidence     = float(trading_signal.get("confidence_score", 0.0))
-        conviction     = trading_signal.get("conviction_level", "LOW").upper()
 
+        # Portfolio-level signal
+        signal_type = str(trading_signal.get("signal_type", "HOLD") or "HOLD").upper()
+        confidence  = float(trading_signal.get("confidence_score", 0.0) or 0.0)
+        conviction  = str(trading_signal.get("conviction_level", "LOW") or "LOW").upper()
+
+        # Per-symbol recommendations: underlying_symbol → {action, thesis, symbol (exec ticker)}
         recommendations = trading_signal.get("recommendations") or []
         rec_map = {
-            str(r.get("underlying_symbol", r.get("symbol", "")) or "").upper(): r
+            str(r.get("underlying_symbol") or r.get("symbol") or "").upper(): r
             for r in recommendations
         }
 
+        results = {}
         for symbol in symbols:
             sym_upper = symbol.upper()
             rec        = rec_map.get(sym_upper, {})
-            sent       = sentiment_scores.get(sym_upper, {})
-            directional = float(sent.get("directional_score", 0.0) if sent else 0.0)
+            sent_entry = sentiment_scores.get(sym_upper) or {}
 
-            action = str(rec.get("action", "") or "").upper()
-            if action == "BUY":
+            # directional_score from sentiment_scores (per-symbol, -1 to +1)
+            directional = float(sent_entry.get("directional_score", 0.0) or 0.0)
+
+            # Per-symbol signal: prefer the recommendation thesis, fall back to portfolio signal
+            thesis = str(rec.get("thesis") or "").upper()
+            action = str(rec.get("action") or "").upper()
+
+            if thesis in ("LONG", "SHORT"):
+                sym_signal = thesis
+            elif action == "BUY":
                 sym_signal = "LONG"
             elif action == "SELL":
                 sym_signal = "SHORT"
@@ -295,7 +338,7 @@ def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dic
 def trigger_sentiment_async(symbols: list[str]):
     """
     Fire Sentiment-Trading-Alpha pipeline in a background thread so it
-    doesn't block startup. Result will be cached by 9:45 AM opening.
+    doesn't block startup. Result cached by 9:45 AM ORB window opening.
     """
     def _run():
         try:
@@ -320,8 +363,8 @@ def enrich_bias(
     run_sentiment: bool = True,
 ) -> dict:
     """
-    Main entry point. Enriches a daily_bias dict in-place with pre-market
-    gap data, Alpaca news sentiment, and (optionally) Sentiment-Trading-Alpha.
+    Enriches a daily_bias dict in-place with pre-market gap data,
+    Alpaca news sentiment, and (optionally) Sentiment-Trading-Alpha signal.
     """
     symbols = list(bias.keys())
     if not symbols:
@@ -376,7 +419,7 @@ def enrich_bias(
 def premarket_conviction_boost(bias_entry: dict) -> float:
     """
     Calculate a conviction boost (0–25 points) from pre-market signals.
-    Called in _process_symbol() conviction scoring.
+    Called in _process_symbol() conviction scoring in trend_filtered_orb.py.
     """
     boost = 0.0
 
