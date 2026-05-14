@@ -138,3 +138,35 @@ def clear_cache():
     """Clear the earnings cache — call at start of each trading day."""
     global _earnings_cache
     _earnings_cache = {}
+
+
+def prefetch_earnings(symbols: list):
+    """
+    Pre-warm the earnings cache for all symbols at startup.
+    Fires _get_next_earnings_date() for each symbol so the results are
+    cached before the first trade check, avoiding per-symbol fetch latency
+    during the ORB window.
+
+    yfinance prints "No earnings dates found" for every ETF (which is most
+    of the watchlist). We suppress stdout during prefetch to avoid startup
+    noise — the filter still works correctly regardless.
+    """
+    import sys, io
+    upcoming = []
+    for symbol in symbols:
+        try:
+            # Suppress yfinance's verbose ETF warnings during bulk prefetch
+            _stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            date = _get_next_earnings_date(symbol)
+            sys.stdout = _stdout
+            if date:
+                upcoming.append(f"{symbol}:{date}")
+        except Exception:
+            try: sys.stdout = _stdout
+            except: pass
+
+    if upcoming:
+        print(f"[startup] Earnings alerts: {', '.join(upcoming)}")
+    else:
+        print(f"[startup] Earnings cache ready — no imminent reports found")

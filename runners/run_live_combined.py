@@ -59,6 +59,9 @@ def main():
 
     mode = "📄 PAPER TRADING" if is_paper else "💰 LIVE TRADING ⚠️ REAL MONEY"
 
+    sentiment_url  = os.getenv("SENTIMENT_API_URL", "http://localhost:8000")
+    sentiment_configured = bool(os.getenv("SENTIMENT_ADMIN_TOKEN", ""))
+
     print("\n" + "=" * 70)
     print("  🚀  TREND-FILTERED ORB — AI-ENHANCED LIVE STRATEGY  v5")
     print("=" * 70)
@@ -70,6 +73,7 @@ def main():
     print(f"  HOLD Override     : {PARAMS['hold_override']}")
     print(f"  Ollama Model      : qwen3:8b (localhost:11434)")
     print(f"  Trade Journal     : cache/trade_journal.db")
+    print(f"  Sentiment Alpha    : {sentiment_url} ({'token set ✅' if sentiment_configured else 'no token ⚠️'})")
     print("=" * 70)
     print()
     print("  Daily schedule:")
@@ -91,6 +95,11 @@ def main():
     print()
     print("  To stop: Ctrl+C")
     print("=" * 70 + "\n")
+
+    print("  🔄 Running startup refresh (bias + earnings cache)...")
+    print("     This ensures signals are current regardless of start time.")
+    print()
+    strategy.startup_refresh()
 
     trader.run_all()
 

@@ -1,0 +1,1254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ORB Trading Bot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:        #0a0c0f;
+  --surface:   #0f1218;
+  --surface2:  #141820;
+  --border:    #1e2530;
+  --border2:   #252f3d;
+  --text:      #c8d8e8;
+  --muted:     #4a5a6a;
+  --muted2:    #3a4858;
+  --accent:    #00d4aa;
+  --accent2:   #0099ff;
+  --buy:       #00d4aa;
+  --sell:      #ff4466;
+  --hold:      #f5a623;
+  --win:       #00d4aa;
+  --loss:      #ff4466;
+  --mono:      'IBM Plex Mono', monospace;
+  --sans:      'IBM Plex Sans', sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Scanline overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.03) 2px,
+    rgba(0,0,0,0.03) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ── Header ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.header-left { display: flex; align-items: center; gap: 16px; }
+
+.logo {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.logo span { color: var(--muted); font-weight: 300; }
+
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--muted2);
+  display: inline-block;
+  margin-right: 6px;
+  transition: background 0.3s;
+}
+.status-dot.live { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 2s infinite; }
+.status-dot.stale { background: var(--hold); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.header-meta { display: flex; gap: 20px; align-items: center; }
+.header-meta .meta-item { color: var(--muted); font-size: 11px; }
+.header-meta .meta-item strong { color: var(--text); font-weight: 500; }
+
+.last-update { font-size: 11px; color: var(--muted); }
+
+/* ── Nav tabs ── */
+.nav {
+  display: flex;
+  gap: 0;
+  padding: 0 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-tab {
+  padding: 10px 18px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  user-select: none;
+}
+.nav-tab:hover { color: var(--text); }
+.nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* ── Layout ── */
+.main { padding: 20px 24px; max-width: 1600px; }
+
+.page { display: none; }
+.page.active { display: block; }
+
+/* ── Stat cards row ── */
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 14px 16px;
+  position: relative;
+  overflow: hidden;
+}
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: var(--border2);
+}
+.stat-card.accent::before { background: var(--accent); }
+.stat-card.buy::before    { background: var(--buy); }
+.stat-card.sell::before   { background: var(--sell); }
+.stat-card.hold::before   { background: var(--hold); }
+.stat-card.blue::before   { background: var(--accent2); }
+
+.stat-label {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+.stat-value {
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1;
+}
+.stat-value.buy  { color: var(--buy); }
+.stat-value.sell { color: var(--sell); }
+.stat-value.hold { color: var(--hold); }
+.stat-value.pos  { color: var(--win); }
+.stat-value.neg  { color: var(--loss); }
+
+.stat-sub { font-size: 10px; color: var(--muted); margin-top: 4px; }
+
+/* ── Grid layouts ── */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.grid-wide { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 16px; }
+
+/* ── Panel ── */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.panel-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.panel-title .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.panel-badge {
+  font-size: 10px;
+  padding: 2px 7px;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  color: var(--muted);
+  border-radius: 2px;
+}
+
+.panel-body { padding: 0; overflow-y: auto; flex: 1; }
+
+/* ── Table ── */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.data-table thead th {
+  padding: 8px 12px;
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+  font-weight: 500;
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+}
+
+.data-table thead th:first-child { padding-left: 14px; }
+
+.data-table tbody tr {
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s;
+}
+.data-table tbody tr:hover { background: var(--surface2); }
+.data-table tbody tr:last-child { border-bottom: none; }
+
+.data-table td {
+  padding: 8px 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.data-table td:first-child { padding-left: 14px; }
+
+/* ── Badges ── */
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 2px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+.badge-buy       { background: rgba(0,212,170,0.15); color: var(--buy);  border: 1px solid rgba(0,212,170,0.3); }
+.badge-strong-buy { background: rgba(0,212,170,0.25); color: var(--buy); border: 1px solid rgba(0,212,170,0.5); }
+.badge-sell       { background: rgba(255,68,102,0.15); color: var(--sell); border: 1px solid rgba(255,68,102,0.3); }
+.badge-strong-sell { background: rgba(255,68,102,0.25); color: var(--sell); border: 1px solid rgba(255,68,102,0.5); }
+.badge-hold       { background: rgba(245,166,35,0.12); color: var(--hold); border: 1px solid rgba(245,166,35,0.25); }
+.badge-long       { background: rgba(0,212,170,0.15); color: var(--buy);  border: 1px solid rgba(0,212,170,0.3); }
+.badge-short      { background: rgba(255,68,102,0.15); color: var(--sell); border: 1px solid rgba(255,68,102,0.3); }
+.badge-win        { background: rgba(0,212,170,0.15); color: var(--win);  border: 1px solid rgba(0,212,170,0.3); }
+.badge-loss       { background: rgba(255,68,102,0.15); color: var(--loss); border: 1px solid rgba(255,68,102,0.3); }
+.badge-breakeven  { background: rgba(74,90,106,0.3); color: var(--muted); border: 1px solid var(--border2); }
+
+/* ── Score bars ── */
+.score-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 90px;
+}
+.score-bar {
+  flex: 1;
+  height: 4px;
+  background: var(--border2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.score-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+.score-bar-fill.bull { background: var(--buy); }
+.score-bar-fill.bear { background: var(--sell); }
+.score-num { font-size: 11px; color: var(--muted); width: 12px; text-align: right; }
+
+/* ── RSI meter ── */
+.rsi-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.rsi-val {
+  font-size: 12px;
+  font-weight: 500;
+  min-width: 36px;
+}
+.rsi-val.overbought { color: var(--sell); }
+.rsi-val.oversold   { color: var(--buy); }
+.rsi-val.neutral    { color: var(--muted); }
+
+/* ── Mini sparkline placeholder ── */
+.sparkline { color: var(--muted); font-size: 11px; }
+
+/* ── Equity chart ── */
+.chart-container {
+  padding: 16px;
+  height: 220px;
+  position: relative;
+}
+
+canvas { width: 100% !important; }
+
+/* ── Position card ── */
+.position-card {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: start;
+}
+.position-card:last-child { border-bottom: none; }
+.position-ticker { font-size: 16px; font-weight: 600; color: var(--text); }
+.position-dir { font-size: 10px; color: var(--muted); }
+.position-detail { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.position-detail strong { color: var(--text); }
+.position-pnl { font-size: 15px; font-weight: 600; text-align: right; }
+
+/* ── Filter row ── */
+.filter-row {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+  align-items: center;
+}
+.filter-btn {
+  padding: 3px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid var(--border2);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s;
+  border-radius: 2px;
+}
+.filter-btn:hover { border-color: var(--accent); color: var(--accent); }
+.filter-btn.active { background: rgba(0,212,170,0.1); border-color: var(--accent); color: var(--accent); }
+
+.filter-label { font-size: 11px; color: var(--muted); margin-right: 4px; }
+
+.search-input {
+  padding: 4px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--bg);
+  border: 1px solid var(--border2);
+  color: var(--text);
+  outline: none;
+  border-radius: 2px;
+  width: 180px;
+  margin-left: auto;
+}
+.search-input:focus { border-color: var(--accent); }
+
+/* ── Days selector ── */
+.days-selector { display: flex; gap: 4px; }
+.day-btn {
+  padding: 3px 9px;
+  font-family: var(--mono);
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid var(--border2);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s;
+  border-radius: 2px;
+}
+.day-btn:hover { color: var(--accent); border-color: var(--accent); }
+.day-btn.active { background: rgba(0,212,170,0.1); color: var(--accent); border-color: var(--accent); }
+
+/* ── Regime badge ── */
+.regime-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 10px;
+  border-radius: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.regime-trending    { background: rgba(0,153,255,0.12); color: #4db8ff; border: 1px solid rgba(0,153,255,0.25); }
+.regime-volatile    { background: rgba(255,68,102,0.12); color: #ff8099; border: 1px solid rgba(255,68,102,0.25); }
+.regime-ranging     { background: rgba(245,166,35,0.12); color: var(--hold); border: 1px solid rgba(245,166,35,0.25); }
+.regime-unknown     { background: var(--surface2); color: var(--muted); border: 1px solid var(--border2); }
+.regime-low_liquidity { background: rgba(74,90,106,0.3); color: var(--muted); border: 1px solid var(--border2); }
+
+/* ── No data ── */
+.empty-state {
+  padding: 40px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+.empty-state .empty-icon { font-size: 32px; margin-bottom: 10px; opacity: 0.4; }
+
+/* ── Refresh spinner ── */
+.spin { animation: spin 1s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted2); }
+
+/* ── Sentiment column ── */
+.sentiment-cell { display: flex; gap: 5px; align-items: center; font-size: 11px; }
+.sent-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+
+/* ── Responsiveness ── */
+@media (max-width: 1100px) {
+  .grid-2, .grid-3, .grid-wide { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <div class="logo">ORB<span>/</span>Bot <span style="font-size:11px;color:var(--muted)">v5</span></div>
+    <div style="font-size:11px;color:var(--muted)">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">connecting...</span>
+    </div>
+  </div>
+  <div class="header-meta">
+    <div class="meta-item"><strong id="hSymbols">—</strong> symbols</div>
+    <div class="meta-item"><strong id="hBuys" style="color:var(--buy)">—</strong> BUY</div>
+    <div class="meta-item"><strong id="hSells" style="color:var(--sell)">—</strong> SELL</div>
+    <div class="meta-item"><strong id="hPositions">—</strong> open</div>
+  </div>
+  <div class="last-update" id="lastUpdate">—</div>
+</div>
+
+<nav class="nav">
+  <div class="nav-tab active" onclick="showPage('overview')">Overview</div>
+  <div class="nav-tab" onclick="showPage('signals')">Signals</div>
+  <div class="nav-tab" onclick="showPage('positions')">Positions</div>
+  <div class="nav-tab" onclick="showPage('trades')">Trade Log</div>
+  <div class="nav-tab" onclick="showPage('performance')">Performance</div>
+  <div class="nav-tab" onclick="showPage('regime')">Regime</div>
+</nav>
+
+<div class="main">
+
+<!-- ══ OVERVIEW ══ -->
+<div class="page active" id="page-overview">
+  <div class="stat-row" id="overviewStats">
+    <div class="stat-card accent">
+      <div class="stat-label">Bias Date</div>
+      <div class="stat-value" id="ov-date" style="font-size:16px">—</div>
+      <div class="stat-sub" id="ov-status">—</div>
+    </div>
+    <div class="stat-card buy">
+      <div class="stat-label">Buy Signals</div>
+      <div class="stat-value buy" id="ov-buys">—</div>
+      <div class="stat-sub">BUY + STRONG_BUY</div>
+    </div>
+    <div class="stat-card sell">
+      <div class="stat-label">Sell Signals</div>
+      <div class="stat-value sell" id="ov-sells">—</div>
+      <div class="stat-sub">SELL + STRONG_SELL</div>
+    </div>
+    <div class="stat-card hold">
+      <div class="stat-label">Hold</div>
+      <div class="stat-value hold" id="ov-holds">—</div>
+      <div class="stat-sub">Neutral bias</div>
+    </div>
+    <div class="stat-card blue">
+      <div class="stat-label">Open Positions</div>
+      <div class="stat-value" id="ov-openpos">—</div>
+      <div class="stat-sub" id="ov-maxpos">max —</div>
+    </div>
+    <div class="stat-card accent">
+      <div class="stat-label">30d Win Rate</div>
+      <div class="stat-value" id="ov-winrate">—</div>
+      <div class="stat-sub" id="ov-trades">— trades</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">30d P&amp;L</div>
+      <div class="stat-value" id="ov-pnl">—</div>
+      <div class="stat-sub" id="ov-pf">PF: —</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Avg R-Multiple</div>
+      <div class="stat-value" id="ov-avgr">—</div>
+      <div class="stat-sub">realized</div>
+    </div>
+  </div>
+
+  <div class="grid-wide">
+    <!-- Equity Curve -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title"><span class="dot"></span>Cumulative P&amp;L</div>
+        <div class="panel-badge" id="equityBadge">All time</div>
+      </div>
+      <div class="chart-container">
+        <canvas id="equityChart"></canvas>
+      </div>
+    </div>
+    <!-- Open Positions quick view -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title"><span class="dot"></span>Open Positions</div>
+        <div class="panel-badge" id="openPosBadge">0</div>
+      </div>
+      <div class="panel-body" id="openPosPanel" style="min-height:180px"></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <!-- Top signals today -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title"><span class="dot"></span>Top BUY Signals</div>
+      </div>
+      <div class="panel-body">
+        <table class="data-table">
+          <thead><tr>
+            <th>Symbol</th><th>Action</th><th>Bull</th><th>RSI</th><th>Vol</th>
+          </tr></thead>
+          <tbody id="topBuysTable"></tbody>
+        </table>
+      </div>
+    </div>
+    <!-- Recent trades -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title"><span class="dot"></span>Recent Trades</div>
+      </div>
+      <div class="panel-body">
+        <table class="data-table">
+          <thead><tr>
+            <th>Symbol</th><th>Dir</th><th>P&amp;L</th><th>R</th><th>Exit</th>
+          </tr></thead>
+          <tbody id="recentTradesTable"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ SIGNALS ══ -->
+<div class="page" id="page-signals">
+  <div class="panel" style="margin-bottom:16px">
+    <div class="filter-row">
+      <span class="filter-label">Filter:</span>
+      <button class="filter-btn active" onclick="filterBias('all', this)">All</button>
+      <button class="filter-btn" onclick="filterBias('buy', this)">BUY</button>
+      <button class="filter-btn" onclick="filterBias('sell', this)">SELL</button>
+      <button class="filter-btn" onclick="filterBias('hold', this)">HOLD</button>
+      <input class="search-input" id="biasSearch" placeholder="search symbol..." oninput="renderBiasTable()">
+    </div>
+    <div class="panel-body" style="max-height:680px;overflow-y:auto">
+      <table class="data-table" id="biasTable">
+        <thead><tr>
+          <th>Symbol</th>
+          <th>Action</th>
+          <th>Bull ▸</th>
+          <th>Bear ▸</th>
+          <th>RSI</th>
+          <th>Vol Ratio</th>
+          <th>Gap</th>
+          <th>News</th>
+          <th>Sentiment</th>
+          <th>Source</th>
+          <th>Date</th>
+        </tr></thead>
+        <tbody id="biasBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══ POSITIONS ══ -->
+<div class="page" id="page-positions">
+  <div class="stat-row">
+    <div class="stat-card accent">
+      <div class="stat-label">Open Positions</div>
+      <div class="stat-value" id="pos-count">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Exposure</div>
+      <div class="stat-value" style="font-size:18px" id="pos-exposure">—</div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-header">
+      <div class="panel-title"><span class="dot"></span>Open Positions</div>
+    </div>
+    <div class="panel-body">
+      <table class="data-table" id="posTable">
+        <thead><tr>
+          <th>Symbol</th><th>Dir</th><th>Entry</th><th>Current</th><th>Unreal P&amp;L</th><th>Qty</th>
+          <th>Stop</th><th>Target</th><th>Regime</th><th>AI Conf</th><th>Opened</th>
+        </tr></thead>
+        <tbody id="posBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══ TRADE LOG ══ -->
+<div class="page" id="page-trades">
+  <div class="panel">
+    <div class="filter-row">
+      <span class="filter-label">Result:</span>
+      <button class="filter-btn active" onclick="filterTrades('all', this)">All</button>
+      <button class="filter-btn" onclick="filterTrades('WIN', this)">WIN</button>
+      <button class="filter-btn" onclick="filterTrades('LOSS', this)">LOSS</button>
+      <span class="filter-label" style="margin-left:12px">Dir:</span>
+      <button class="filter-btn active" onclick="filterTradesDir('all', this)">All</button>
+      <button class="filter-btn" onclick="filterTradesDir('LONG', this)">LONG</button>
+      <button class="filter-btn" onclick="filterTradesDir('SHORT', this)">SHORT</button>
+      <input class="search-input" id="tradeSearch" placeholder="search symbol..." oninput="renderTradesTable()">
+    </div>
+    <div class="panel-body" style="max-height:640px;overflow-y:auto">
+      <table class="data-table">
+        <thead><tr>
+          <th>Date</th><th>Symbol</th><th>→ Exec</th><th>Dir</th>
+          <th>Entry</th><th>Exit</th><th>P&amp;L</th><th>R</th>
+          <th>Result</th><th>Exit Reason</th><th>AI</th><th>Regime</th>
+        </tr></thead>
+        <tbody id="tradeBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══ PERFORMANCE ══ -->
+<div class="page" id="page-performance">
+  <div class="panel-header" style="background:var(--surface);border:1px solid var(--border);border-bottom:none;padding:10px 14px;display:flex;gap:8px;align-items:center">
+    <span class="panel-title" style="margin-right:12px"><span class="dot"></span>Period</span>
+    <div class="days-selector">
+      <button class="day-btn active" onclick="loadStats(7, this)">7d</button>
+      <button class="day-btn" onclick="loadStats(30, this)">30d</button>
+      <button class="day-btn" onclick="loadStats(60, this)">60d</button>
+      <button class="day-btn" onclick="loadStats(90, this)">90d</button>
+      <button class="day-btn" onclick="loadStats(365, this)">1y</button>
+    </div>
+  </div>
+
+  <div class="stat-row" id="perfStats" style="border:1px solid var(--border);border-top:none;background:var(--surface);padding:14px"></div>
+
+  <div class="grid-2" style="margin-top:16px">
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><span class="dot"></span>By Symbol</div></div>
+      <div class="panel-body" style="max-height:340px;overflow-y:auto">
+        <table class="data-table"><thead><tr>
+          <th>Symbol</th><th>Trades</th><th>W</th><th>L</th><th>Win%</th><th>P&L</th>
+        </tr></thead><tbody id="perfSymbolBody"></tbody></table>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><span class="dot"></span>By Regime</div></div>
+      <div class="panel-body" style="max-height:340px;overflow-y:auto">
+        <table class="data-table"><thead><tr>
+          <th>Regime</th><th>Trades</th><th>W</th><th>L</th><th>Win%</th><th>P&L</th>
+        </tr></thead><tbody id="perfRegimeBody"></tbody></table>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:0">
+    <div class="panel-header"><div class="panel-title"><span class="dot"></span>Daily P&amp;L</div></div>
+    <div class="chart-container">
+      <canvas id="dailyPnlChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- ══ REGIME ══ -->
+<div class="page" id="page-regime">
+  <div class="panel">
+    <div class="panel-header">
+      <div class="panel-title"><span class="dot"></span>Latest Regime Readings</div>
+    </div>
+    <div class="panel-body">
+      <table class="data-table">
+        <thead><tr>
+          <th>Symbol</th><th>Regime</th><th>Suitability</th><th>Confidence</th><th>Logged At</th><th>Reasoning</th>
+        </tr></thead>
+        <tbody id="regimeBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+</div><!-- /main -->
+
+<!-- Chart.js CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+const API = '';  // same origin
+let biasData = [];
+let tradesData = [];
+let positionsData = [];
+let statsData = {};
+let equityData = [];
+let biasFilter = 'all';
+let tradeFilter = 'all';
+let tradeDirFilter = 'all';
+let equityChart = null;
+let dailyChart = null;
+let currentStatsDays = 7;
+
+// ── Routing ────────────────────────────────────────────────────────────────
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'performance') loadStats(currentStatsDays);
+  if (name === 'regime') loadRegime();
+}
+
+// ── Fetch helpers ──────────────────────────────────────────────────────────
+async function fetchJSON(path) {
+  const r = await fetch(API + path);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+// ── Format helpers ─────────────────────────────────────────────────────────
+function fmtPnl(v) {
+  if (v == null) return '<span style="color:var(--muted)">—</span>';
+  const cls = v > 0 ? 'pos' : v < 0 ? 'neg' : '';
+  const sign = v > 0 ? '+' : '';
+  return `<span class="${cls}">${sign}$${Math.abs(v).toFixed(2)}</span>`;
+}
+function fmtR(v) {
+  if (v == null) return '<span style="color:var(--muted)">—</span>';
+  const cls = v > 0 ? 'pos' : v < 0 ? 'neg' : '';
+  const sign = v > 0 ? '+' : '';
+  return `<span class="${cls}">${sign}${v.toFixed(2)}R</span>`;
+}
+function fmtPct(v) {
+  if (v == null) return '—';
+  return (v > 0 ? '+' : '') + v.toFixed(1) + '%';
+}
+function fmtTime(s) {
+  if (!s) return '—';
+  return s.replace('T', ' ').slice(0, 16);
+}
+function actionBadge(a) {
+  if (!a) return '';
+  const map = {
+    'BUY':         'badge-buy',
+    'STRONG_BUY':  'badge-strong-buy',
+    'SELL':        'badge-sell',
+    'STRONG_SELL': 'badge-strong-sell',
+    'HOLD':        'badge-hold',
+    'LONG':        'badge-long',
+    'SHORT':       'badge-short',
+  };
+  return `<span class="badge ${map[a] || ''}">${a}</span>`;
+}
+function resultBadge(r) {
+  if (!r) return '';
+  const map = {'WIN':'badge-win','LOSS':'badge-loss','BREAKEVEN':'badge-breakeven'};
+  return `<span class="badge ${map[r]||''}">${r}</span>`;
+}
+function scoreBar(score, type, max=5) {
+  const pct = Math.min((score/max)*100, 100);
+  return `<div class="score-bar-wrap">
+    <div class="score-bar"><div class="score-bar-fill ${type}" style="width:${pct}%"></div></div>
+    <span class="score-num">${score}</span>
+  </div>`;
+}
+function rsiCell(rsi) {
+  if (rsi == null) return '—';
+  const cls = rsi >= 70 ? 'overbought' : rsi <= 30 ? 'oversold' : 'neutral';
+  return `<div class="rsi-cell"><span class="rsi-val ${cls}">${rsi}</span></div>`;
+}
+function regimeBadge(r) {
+  if (!r) return '<span style="color:var(--muted)">—</span>';
+  const key = r.toLowerCase().replace(/ /g,'_');
+  const map = {
+    'trending':'regime-trending','trending_up':'regime-trending','trending_down':'regime-trending',
+    'volatile':'regime-volatile','ranging':'regime-ranging','mean_reversion':'regime-ranging',
+    'low_liquidity':'regime-low_liquidity','unknown':'regime-unknown'
+  };
+  return `<span class="regime-badge ${map[key]||'regime-unknown'}">${r}</span>`;
+}
+
+// ── Overview ───────────────────────────────────────────────────────────────
+async function loadOverview() {
+  const [status, positions, trades, equity] = await Promise.all([
+    fetchJSON('/api/status').catch(()=>null),
+    fetchJSON('/api/positions').catch(()=>[]),
+    fetchJSON('/api/trades/recent?limit=10').catch(()=>[]),
+    fetchJSON('/api/equity').catch(()=>[]),
+  ]);
+
+  positionsData = positions;
+  tradesData    = trades;
+  equityData    = equity;
+
+  if (status) {
+    const dot  = document.getElementById('statusDot');
+    const txt  = document.getElementById('statusText');
+    dot.className = 'status-dot ' + (status.bias_current ? 'live' : 'stale');
+    txt.textContent = status.bias_current ? 'Bias current' : 'Bias stale';
+    document.getElementById('hSymbols').textContent   = status.symbols_watched;
+    document.getElementById('hBuys').textContent      = status.buys;
+    document.getElementById('hSells').textContent     = status.sells;
+    document.getElementById('hPositions').textContent = positions.length;
+
+    document.getElementById('ov-date').textContent   = status.bias_date || '—';
+    document.getElementById('ov-status').textContent = status.bias_current ? '✓ current' : '⚠ stale';
+    document.getElementById('ov-buys').textContent   = status.buys;
+    document.getElementById('ov-sells').textContent  = status.sells;
+    document.getElementById('ov-holds').textContent  = status.holds;
+    document.getElementById('ov-openpos').textContent = positions.length;
+    document.getElementById('lastUpdate').textContent =
+      'Updated ' + new Date().toLocaleTimeString();
+  }
+
+  // Stats
+  const stats = await fetchJSON('/api/stats?days=30').catch(()=>null);
+  if (stats && stats.total_trades > 0) {
+    const wr = stats.win_rate;
+    const wrEl = document.getElementById('ov-winrate');
+    wrEl.textContent = wr + '%';
+    wrEl.className = 'stat-value ' + (wr >= 50 ? 'pos' : 'neg');
+    document.getElementById('ov-trades').textContent = stats.total_trades + ' trades';
+    const pnlEl = document.getElementById('ov-pnl');
+    pnlEl.innerHTML = fmtPnl(stats.total_pnl);
+    pnlEl.style.fontSize = '18px';
+    document.getElementById('ov-pf').textContent =
+      'PF: ' + (stats.profit_factor ? stats.profit_factor.toFixed(2) : '—');
+    document.getElementById('ov-avgr').textContent =
+      (stats.avg_r > 0 ? '+' : '') + stats.avg_r + 'R';
+    document.getElementById('ov-avgr').className =
+      'stat-value ' + (stats.avg_r > 0 ? 'pos' : 'neg');
+  }
+
+  // Open positions panel
+  const pp = document.getElementById('openPosPanel');
+  const opBadge = document.getElementById('openPosBadge');
+  opBadge.textContent = positions.length;
+  if (!positions.length) {
+    pp.innerHTML = '<div class="empty-state"><div class="empty-icon">◫</div>No open positions</div>';
+  } else {
+    pp.innerHTML = positions.map(p => {
+      const dirCls = p.direction === 'LONG' ? 'long' : 'short';
+      const pnl = p.unrealized_pnl;
+      const pnlHtml = pnl != null
+        ? `<div class="position-pnl ${pnl >= 0 ? 'pos' : 'neg'}">${pnl >= 0 ? '+' : ''}$${Math.abs(pnl).toFixed(2)}</div>`
+        : `<div class="position-pnl" style="color:var(--muted)">—</div>`;
+      const curPrice = p.current_price ? `<strong>$${p.current_price.toFixed(2)}</strong> now · ` : '';
+      return `<div class="position-card">
+        <div>
+          <div class="position-ticker">${p.exec_ticker}</div>
+          <div class="position-dir"><span class="badge badge-${dirCls}">${p.direction}</span></div>
+        </div>
+        <div>
+          <div class="position-detail">${curPrice}Entry: <strong>$${(p.entry_price||0).toFixed(2)}</strong> × ${p.quantity}</div>
+          <div class="position-detail">Stop: <strong>${p.initial_stop ? '$'+p.initial_stop.toFixed(2) : '—'}</strong> · Target: <strong>${p.initial_target ? '$'+p.initial_target.toFixed(2) : '—'}</strong></div>
+          <div class="position-detail">AI: <strong>${p.ai_confidence ? (p.ai_confidence*100).toFixed(0)+'%' : '—'}</strong> · ${regimeBadge(p.regime)}</div>
+        </div>
+        ${pnlHtml}
+      </div>`;
+    }).join('');
+  }
+
+  // Top buys
+  const buys = biasData.filter(b => b.action.includes('BUY')).slice(0,8);
+  document.getElementById('topBuysTable').innerHTML = buys.map(b => `
+    <tr>
+      <td style="font-weight:500">${b.symbol}</td>
+      <td>${actionBadge(b.action)}</td>
+      <td>${scoreBar(b.bull_score,'bull')}</td>
+      <td>${rsiCell(b.rsi)}</td>
+      <td style="color:${b.vol_ratio>=1.3?'var(--buy)':'var(--muted)'}">${b.vol_ratio}×</td>
+    </tr>`).join('') || '<tr><td colspan="5" class="empty-state">No BUY signals</td></tr>';
+
+  // Recent trades
+  document.getElementById('recentTradesTable').innerHTML = trades.slice(0,8).map(t => `
+    <tr>
+      <td style="font-weight:500">${t.symbol}</td>
+      <td>${actionBadge(t.direction)}</td>
+      <td>${fmtPnl(t.pnl)}</td>
+      <td>${fmtR(t.r_multiple)}</td>
+      <td style="color:var(--muted)">${(t.exit_reason||'').slice(0,10)}</td>
+    </tr>`).join('') || '<tr><td colspan="5" class="empty-state">No trades yet</td></tr>';
+
+  // Equity chart
+  drawEquityChart(equity);
+}
+
+function drawEquityChart(data) {
+  const ctx = document.getElementById('equityChart').getContext('2d');
+  if (equityChart) equityChart.destroy();
+  if (!data.length) return;
+
+  const labels = data.map(d => d.date);
+  const values = data.map(d => d.cumulative_pnl);
+  const lastVal = values[values.length-1];
+  const color = lastVal >= 0 ? '#00d4aa' : '#ff4466';
+
+  equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        borderColor: color,
+        borderWidth: 2,
+        fill: true,
+        backgroundColor: (ctx) => {
+          const g = ctx.chart.ctx.createLinearGradient(0,0,0,200);
+          g.addColorStop(0, color + '33');
+          g.addColorStop(1, color + '00');
+          return g;
+        },
+        tension: 0.3,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: {
+        callbacks: { label: c => '$' + c.parsed.y.toFixed(2) },
+        backgroundColor: '#141820',
+        borderColor: '#1e2530',
+        borderWidth: 1,
+        titleColor: '#c8d8e8',
+        bodyColor: color,
+      }},
+      scales: {
+        x: { display: true, ticks: { color: '#4a5a6a', maxTicksLimit: 6, font: { family: 'IBM Plex Mono', size: 10 } }, grid: { color: '#1e2530' } },
+        y: { display: true, ticks: { color: '#4a5a6a', callback: v => '$' + v, font: { family: 'IBM Plex Mono', size: 10 } }, grid: { color: '#1e2530' } }
+      }
+    }
+  });
+}
+
+// ── Signals / Bias ─────────────────────────────────────────────────────────
+async function loadBias() {
+  biasData = await fetchJSON('/api/bias').catch(()=>[]);
+  renderBiasTable();
+}
+
+function filterBias(f, btn) {
+  biasFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderBiasTable();
+}
+
+function renderBiasTable() {
+  const search = (document.getElementById('biasSearch')?.value || '').toUpperCase();
+  let data = biasData;
+  if (biasFilter === 'buy')  data = data.filter(b => b.action.includes('BUY'));
+  if (biasFilter === 'sell') data = data.filter(b => b.action.includes('SELL'));
+  if (biasFilter === 'hold') data = data.filter(b => b.action === 'HOLD');
+  if (search) data = data.filter(b => b.symbol.includes(search));
+
+  document.getElementById('biasBody').innerHTML = data.map(b => {
+    // Gap cell
+    let gapCell = '<span style="color:var(--muted)">—</span>';
+    if (b.gap_pct != null) {
+      const cls = b.gap_pct > 0 ? 'pos' : b.gap_pct < 0 ? 'neg' : '';
+      gapCell = `<span class="${cls}">${b.gap_pct > 0 ? '+' : ''}${b.gap_pct.toFixed(2)}%</span>`;
+    }
+    // News cell
+    let newsCell = '<span style="color:var(--muted)">—</span>';
+    if (b.news_sentiment != null) {
+      const ns = b.news_sentiment;
+      const cls = ns > 0.15 ? 'pos' : ns < -0.15 ? 'neg' : '';
+      newsCell = `<span class="${cls}">${ns > 0 ? '+' : ''}${ns.toFixed(2)}</span>
+                  <span style="color:var(--muted);font-size:10px"> (${b.news_count||0})</span>`;
+    }
+    // Sentiment cell
+    let sentCell = '<span style="color:var(--muted)">—</span>';
+    if (b.sentiment_signal) {
+      sentCell = `${actionBadge(b.sentiment_signal)}
+        <span style="color:var(--muted);font-size:10px;margin-left:4px">${b.sentiment_conf != null ? (b.sentiment_conf*100).toFixed(0)+'%' : ''}</span>`;
+    }
+
+    return `<tr>
+      <td style="font-weight:500;color:var(--accent)">${b.symbol}</td>
+      <td>${actionBadge(b.action)}</td>
+      <td>${scoreBar(b.bull_score,'bull')}</td>
+      <td>${scoreBar(b.bear_score,'bear')}</td>
+      <td>${rsiCell(b.rsi)}</td>
+      <td style="color:${b.vol_ratio>=1.3?'var(--buy)':b.vol_ratio<0.7?'var(--muted)':'var(--text)'}">${b.vol_ratio}×</td>
+      <td>${gapCell}</td>
+      <td>${newsCell}</td>
+      <td>${sentCell}</td>
+      <td style="color:var(--muted);font-size:11px">${b.source||'—'}</td>
+      <td style="color:var(--muted);font-size:11px">${b.date||'—'}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="11"><div class="empty-state">No signals match filter</div></td></tr>`;
+}
+
+// ── Positions ──────────────────────────────────────────────────────────────
+async function loadPositions() {
+  positionsData = await fetchJSON('/api/positions').catch(()=>[]);
+  const total = positionsData.reduce((s,p) => s + (p.entry_price||0)*(p.quantity||0), 0);
+  document.getElementById('pos-count').textContent = positionsData.length;
+  document.getElementById('pos-exposure').textContent = '$' + total.toLocaleString('en',{maximumFractionDigits:0});
+
+  document.getElementById('posBody').innerHTML = positionsData.map(p => {
+    const pnl = p.unrealized_pnl;
+    const pnlCls = (pnl||0) >= 0 ? 'pos' : 'neg';
+    return `<tr>
+      <td style="font-weight:500;color:var(--accent)">${p.exec_ticker}</td>
+      <td>${actionBadge(p.direction)}</td>
+      <td>$${(p.entry_price||0).toFixed(2)}</td>
+      <td style="color:var(--text)">${p.current_price ? '$'+p.current_price.toFixed(2) : '<span style="color:var(--muted)">—</span>'}</td>
+      <td>${pnl != null ? `<span class="${pnlCls}">${pnl>=0?'+':''}$${Math.abs(pnl).toFixed(2)}</span>` : '<span style="color:var(--muted)">—</span>'}</td>
+      <td>${p.quantity}</td>
+      <td style="color:var(--sell)">${p.initial_stop ? '$'+p.initial_stop.toFixed(2) : '—'}</td>
+      <td style="color:var(--buy)">${p.initial_target ? '$'+p.initial_target.toFixed(2) : '—'}</td>
+      <td>${regimeBadge(p.regime)}</td>
+      <td style="color:${(p.ai_confidence||0)>=0.7?'var(--buy)':'var(--muted)'}">${p.ai_confidence ? (p.ai_confidence*100).toFixed(0)+'%' : '—'}</td>
+      <td style="color:var(--muted);font-size:11px">${fmtTime(p.entry_time)}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="11"><div class="empty-state">No open positions</div></td></tr>`;
+}
+
+// ── Trades ─────────────────────────────────────────────────────────────────
+async function loadTrades() {
+  tradesData = await fetchJSON('/api/trades/recent?limit=200').catch(()=>[]);
+  renderTradesTable();
+}
+
+function filterTrades(f, btn) {
+  tradeFilter = f;
+  event.target.closest('.filter-row').querySelectorAll('.filter-btn').forEach(b => {
+    if (['all','WIN','LOSS'].includes(b.textContent)) b.classList.remove('active');
+  });
+  btn.classList.add('active');
+  renderTradesTable();
+}
+function filterTradesDir(f, btn) {
+  tradeDirFilter = f;
+  event.target.closest('.filter-row').querySelectorAll('.filter-btn').forEach(b => {
+    if (['All','LONG','SHORT'].includes(b.textContent) && b !== event.target) b.classList.remove('active');
+  });
+  btn.classList.add('active');
+  renderTradesTable();
+}
+
+function renderTradesTable() {
+  const search = (document.getElementById('tradeSearch')?.value || '').toUpperCase();
+  let data = tradesData;
+  if (tradeFilter !== 'all') data = data.filter(t => t.win_loss === tradeFilter);
+  if (tradeDirFilter !== 'all') data = data.filter(t => t.direction === tradeDirFilter);
+  if (search) data = data.filter(t => (t.symbol||'').toUpperCase().includes(search));
+
+  document.getElementById('tradeBody').innerHTML = data.map(t => `
+    <tr>
+      <td style="color:var(--muted);font-size:11px">${t.trade_date||'—'}</td>
+      <td style="font-weight:500;color:var(--accent)">${t.symbol}</td>
+      <td style="color:var(--muted)">${t.exec_ticker||'—'}</td>
+      <td>${actionBadge(t.direction)}</td>
+      <td>$${(t.entry_price||0).toFixed(2)}</td>
+      <td>$${(t.exit_price||0).toFixed(2)}</td>
+      <td>${fmtPnl(t.pnl)}</td>
+      <td>${fmtR(t.r_multiple)}</td>
+      <td>${resultBadge(t.win_loss)}</td>
+      <td style="color:var(--muted);font-size:11px">${t.exit_reason||'—'}</td>
+      <td style="color:${(t.ai_confidence||0)>=0.7?'var(--buy)':'var(--muted)'}">${t.ai_confidence?((t.ai_confidence)*100).toFixed(0)+'%':'—'}</td>
+      <td>${regimeBadge(t.regime)}</td>
+    </tr>`).join('') || `<tr><td colspan="12"><div class="empty-state">No trades found</div></td></tr>`;
+}
+
+// ── Performance ────────────────────────────────────────────────────────────
+async function loadStats(days, btn) {
+  currentStatsDays = days;
+  if (btn) {
+    document.querySelectorAll('.day-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  }
+
+  const stats = await fetchJSON(`/api/stats?days=${days}`).catch(()=>null);
+  if (!stats || !stats.total_trades) {
+    document.getElementById('perfStats').innerHTML =
+      '<div class="empty-state" style="grid-column:1/-1">No trade data for this period</div>';
+    return;
+  }
+  statsData = stats;
+
+  // Stat cards
+  const wr = stats.win_rate;
+  document.getElementById('perfStats').innerHTML = `
+    <div class="stat-card accent"><div class="stat-label">Total Trades</div><div class="stat-value">${stats.total_trades}</div></div>
+    <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value ${wr>=50?'pos':'neg'}">${wr}%</div></div>
+    <div class="stat-card buy"><div class="stat-label">Wins</div><div class="stat-value buy">${stats.wins}</div></div>
+    <div class="stat-card sell"><div class="stat-label">Losses</div><div class="stat-value sell">${stats.losses}</div></div>
+    <div class="stat-card"><div class="stat-label">Total P&L</div><div class="stat-value ${stats.total_pnl>=0?'pos':'neg'}" style="font-size:18px">${stats.total_pnl>=0?'+':''}$${Math.abs(stats.total_pnl).toFixed(2)}</div></div>
+    <div class="stat-card"><div class="stat-label">Profit Factor</div><div class="stat-value ${(stats.profit_factor||0)>=1?'pos':'neg'}" style="font-size:18px">${stats.profit_factor||'—'}</div></div>
+    <div class="stat-card"><div class="stat-label">Avg Win</div><div class="stat-value pos" style="font-size:18px">+$${stats.avg_win}</div></div>
+    <div class="stat-card"><div class="stat-label">Avg Loss</div><div class="stat-value neg" style="font-size:18px">-$${stats.avg_loss}</div></div>
+    <div class="stat-card"><div class="stat-label">Avg R-Multiple</div><div class="stat-value ${stats.avg_r>=0?'pos':'neg'}" style="font-size:18px">${stats.avg_r>=0?'+':''}${stats.avg_r}R</div></div>
+  `;
+
+  // By symbol
+  const symEntries = Object.entries(stats.by_symbol||{}).sort((a,b) => b[1].pnl - a[1].pnl);
+  document.getElementById('perfSymbolBody').innerHTML = symEntries.map(([sym, d]) => {
+    const tot = d.wins + d.losses;
+    const wr = tot ? ((d.wins/tot)*100).toFixed(0) : '—';
+    return `<tr>
+      <td style="font-weight:500;color:var(--accent)">${sym}</td>
+      <td>${tot}</td>
+      <td style="color:var(--buy)">${d.wins}</td>
+      <td style="color:var(--sell)">${d.losses}</td>
+      <td style="color:${wr>=50?'var(--buy)':'var(--sell)'}">${wr}%</td>
+      <td>${fmtPnl(d.pnl)}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" class="empty-state">—</td></tr>';
+
+  // By regime
+  const regEntries = Object.entries(stats.by_regime||{}).sort((a,b) => b[1].pnl - a[1].pnl);
+  document.getElementById('perfRegimeBody').innerHTML = regEntries.map(([reg, d]) => {
+    const tot = d.wins + d.losses;
+    const wr = tot ? ((d.wins/tot)*100).toFixed(0) : '—';
+    return `<tr>
+      <td>${regimeBadge(reg)}</td>
+      <td>${tot}</td>
+      <td style="color:var(--buy)">${d.wins}</td>
+      <td style="color:var(--sell)">${d.losses}</td>
+      <td style="color:${wr>=50?'var(--buy)':'var(--sell)'}">${wr}%</td>
+      <td>${fmtPnl(d.pnl)}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" class="empty-state">—</td></tr>';
+
+  // Daily PnL chart
+  drawDailyChart(stats.daily_pnl || {});
+}
+
+function drawDailyChart(dailyPnl) {
+  const ctx = document.getElementById('dailyPnlChart').getContext('2d');
+  if (dailyChart) dailyChart.destroy();
+  const labels = Object.keys(dailyPnl);
+  const values = Object.values(dailyPnl);
+  const colors = values.map(v => v >= 0 ? '#00d4aa88' : '#ff446688');
+  const borders = values.map(v => v >= 0 ? '#00d4aa' : '#ff4466');
+
+  dailyChart = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets: [{
+      data: values,
+      backgroundColor: colors,
+      borderColor: borders,
+      borderWidth: 1,
+      borderRadius: 2,
+    }]},
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: { label: c => (c.parsed.y >= 0 ? '+' : '') + '$' + c.parsed.y.toFixed(2) },
+          backgroundColor: '#141820',
+          borderColor: '#1e2530',
+          borderWidth: 1,
+          titleColor: '#c8d8e8',
+          bodyColor: '#c8d8e8',
+        }
+      },
+      scales: {
+        x: { ticks: { color: '#4a5a6a', maxTicksLimit: 10, font: { family: 'IBM Plex Mono', size: 10 } }, grid: { display: false } },
+        y: { ticks: { color: '#4a5a6a', callback: v => '$' + v, font: { family: 'IBM Plex Mono', size: 10 } }, grid: { color: '#1e2530' } }
+      }
+    }
+  });
+}
+
+// ── Regime ─────────────────────────────────────────────────────────────────
+async function loadRegime() {
+  const data = await fetchJSON('/api/regime').catch(()=>[]);
+  document.getElementById('regimeBody').innerHTML = data.map(r => `
+    <tr>
+      <td style="font-weight:500;color:var(--accent)">${r.symbol}</td>
+      <td>${regimeBadge(r.regime)}</td>
+      <td><span style="color:var(--muted);font-size:11px">${r.suitability||'—'}</span></td>
+      <td style="color:var(--text)">${r.confidence ? (r.confidence*100).toFixed(0)+'%' : '—'}</td>
+      <td style="color:var(--muted);font-size:11px">${fmtTime(r.logged_at)}</td>
+      <td style="color:var(--muted);font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis">${r.reasoning||'—'}</td>
+    </tr>`).join('') || `<tr><td colspan="6"><div class="empty-state">No regime data yet</div></td></tr>`;
+}
+
+// ── Auto-refresh ────────────────────────────────────────────────────────────
+async function refreshAll() {
+  await loadBias();
+  await loadOverview();
+  // Refresh active page data
+  const activePage = document.querySelector('.page.active')?.id;
+  if (activePage === 'page-positions') loadPositions();
+  if (activePage === 'page-trades')    loadTrades();
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+(async () => {
+  await refreshAll();
+  setInterval(refreshAll, 30000);  // Refresh every 30s
+})();
+
+// Page-specific loads
+document.querySelector('[onclick="showPage(\'positions\')"]').addEventListener('click', loadPositions);
+document.querySelector('[onclick="showPage(\'trades\')"]').addEventListener('click', loadTrades);
+document.querySelector('[onclick="showPage(\'regime\')"]').addEventListener('click', loadRegime);
+</script>
+</body>
+</html>

@@ -41,7 +41,7 @@ END              = datetime(2025, 7, 1)
 STARTING_CAPITAL = 10_000
 CACHE_DIR        = "cache"
 
-TICKERS = ["QQQ", "TQQQ", "SQQQ", "SPY", "SPXL", "SPXS", "SMH", "SOXL", "SOXS"]
+TICKERS = ["QQQ", "TQQQ", "SQQQ"]
 
 PARAMS = {
     "orb_minutes":        15,
@@ -75,7 +75,7 @@ def write_neutral_bias(symbols: list, start: datetime):
         }
         for s in symbols
     }
-    path = os.path.join(CACHE_DIR, "daily_bias.json")
+    path = os.path.join(CACHE_DIR, "daily_bias_backtest.json")
     with open(path, "w") as f:
         json.dump(bias, f, indent=2)
     print(f"✅ Neutral bias written for {len(bias)} symbols → {path}")
@@ -162,7 +162,7 @@ if __name__ == "__main__":
     print(f"  Ollama         : must be running for AI grading")
     print("=" * 60 + "\n")
 
-    write_neutral_bias(["QQQ", "SPY", "SMH"], START)
+    write_neutral_bias(["QQQ"], START)
 
     pandas_data = {}
     for ticker in TICKERS:

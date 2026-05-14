@@ -99,10 +99,18 @@ from strategies.trade_journal import TradeJournal
 from notifications.emailer import send_email
 from notifications.discord import send_discord_message
 from notifications.telegram import send_telegram_message
+try:
+    from strategies.premarket_signals import (
+        enrich_bias, trigger_sentiment_async, premarket_conviction_boost
+    )
+    _PREMARKET_AVAILABLE = True
+except ImportError:
+    _PREMARKET_AVAILABLE = False
 
 
-SYMBOLS_FILE  = "symbols.txt"
-BIAS_CACHE    = "cache/daily_bias.json"
+SYMBOLS_FILE       = "symbols.txt"
+BIAS_CACHE         = "cache/daily_bias.json"
+BIAS_CACHE_BACKTEST = "cache/daily_bias_backtest.json"
 
 # ── Signal timing ─────────────────────────────────────────────────────────
 # 3:50 PM — preliminary EOD signals (market still open, ~10 min early)
@@ -185,24 +193,97 @@ class TrendFilteredORB(Strategy):
             f"portfolio: ${self.portfolio_value:,.2f}"
         )
 
+    def startup_refresh(self):
+        """
+        Called from run_live_combined.py immediately after the strategy is
+        instantiated — before trader.run_all(). Runs everything that benefits
+        from being fresh at startup rather than waiting until market open:
+
+          1. Bias signals — refreshes daily_bias.json right now so the cache
+             is never stale when the first ORB window opens, regardless of
+             what time the script is started.
+          2. Earnings cache — pre-fetches the earnings calendar for all symbols
+             so the first trade check doesn't incur the fetch latency.
+
+        Regime is intentionally NOT pre-warmed here — the reading at 7 AM would
+        be ~2.5 hours stale by 9:30 AM. before_market_opens() handles it closer
+        to the open.
+        """
+        print("[startup] Refreshing bias signals...")
+        try:
+            self._run_eod_signals(label="STARTUP")
+        except Exception as e:
+            print(f"[startup] Bias refresh failed: {e} — using cached bias")
+
+        print("[startup] Pre-warming earnings cache...")
+        try:
+            from strategies.earnings_filter import prefetch_earnings
+            symbols = self._load_symbols()
+            prefetch_earnings(symbols)
+            print(f"[startup] Earnings cache ready for {len(symbols)} symbols")
+        except Exception as e:
+            print(f"[startup] Earnings pre-fetch skipped: {e} — will fetch on demand")
+
+        print(f"[startup] Ready | bias: {len(self._daily_bias)} symbols\n")
+
+        # ── Kick off Sentiment-Trading-Alpha pipeline in background ──────────────
+        # Takes 30–120s to run LLM inference — fires async so it's ready
+        # by the time the ORB window opens at 9:45 AM.
+        if _PREMARKET_AVAILABLE:
+            try:
+                symbols = self._load_symbols()
+                trigger_sentiment_async(symbols)
+            except Exception as e:
+                print(f"[startup] Sentiment trigger failed: {e}")
+
     def before_market_opens(self):
         """Called once before each market session (~9:00–9:15 AM ET)."""
-        # Clear earnings cache for new day
+        # Clear earnings cache for new day (fresh data, not startup cache)
         try:
             from strategies.earnings_filter import clear_cache
             clear_cache()
         except Exception:
             pass
 
-        # Pre-warm regime (skipped in backtest mode — no Ollama calls)
+        # Pre-warm regime close to open — more accurate than doing it at startup
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() != "true":
             self._refresh_regime("QQQ")
             self._regime_checked_at = self.get_datetime()
 
-        # Run signals if no bias cache from yesterday
-        if not self._daily_bias:
-            self.log_message("No bias cache — running preliminary signals now")
+        # Only re-run signals if the bias is from a previous day.
+        # If startup_refresh() already ran today, skip it.
+        bias_date = next(iter(self._daily_bias.values()), {}).get("date") if self._daily_bias else None
+        today_str = self.get_datetime().date().strftime("%Y-%m-%d")
+        if not self._daily_bias or bias_date != today_str:
+            self.log_message(
+                f"Bias is from {bias_date or 'empty'} — refreshing for {today_str}"
+            )
             self._run_eod_signals(label="PRE-MARKET")
+        else:
+            self.log_message(
+                f"Bias current ({bias_date}, {len(self._daily_bias)} symbols) — skipping pre-market refresh"
+            )
+
+        # ── Pre-market enrichment ─────────────────────────────────────────
+        # Runs at ~9:00–9:15 AM: gap analysis + Alpaca news sentiment.
+        # Sentiment-Trading-Alpha was already triggered async at startup and will
+        # be available from cache by now.
+        if _PREMARKET_AVAILABLE and not os.getenv("LUMIBOT_BACKTEST_MODE", ""):
+            try:
+                api_key    = os.getenv("ALPACA_API_KEY", "")
+                api_secret = os.getenv("ALPACA_API_SECRET", "")
+                self._daily_bias = enrich_bias(
+                    self._daily_bias, api_key, api_secret, run_sentiment=True
+                )
+                self._save_bias(self._daily_bias)
+                gap_ups   = sum(1 for v in self._daily_bias.values() if v.get("gap_signal") == "GAP_UP")
+                gap_downs = sum(1 for v in self._daily_bias.values() if v.get("gap_signal") == "GAP_DOWN")
+                self.log_message(
+                    f"Pre-market enrichment complete | "
+                    f"gaps: {gap_ups} up / {gap_downs} down"
+                )
+            except Exception as e:
+                self.log_message(f"Pre-market enrichment failed: {e} — using technical bias only")
 
     # ── Main iteration ────────────────────────────────────────────────────
 
@@ -291,11 +372,49 @@ class TrendFilteredORB(Strategy):
 
         # ── ORB entries 9:45 AM – noon ────────────────────────────────────
         if dtime(9, 45) <= now.time() <= dtime(12, 0):
-            for symbol in self._load_symbols():
-                try:
-                    self._process_symbol(symbol, now, today)
-                except Exception as e:
-                    self.log_message(f"Error {symbol}: {e}")
+            max_pos    = self.parameters["max_positions"]
+            slots_used = len(self._positions)
+            slots_free = max_pos - slots_used
+
+            if slots_free > 0:
+                # Collect all valid candidates across the watchlist
+                candidates = []
+                for symbol in self._load_symbols():
+                    try:
+                        c = self._process_symbol(symbol, now, today)
+                        if c is not None:
+                            candidates.append(c)
+                    except Exception as e:
+                        self.log_message(f"Error {symbol}: {e}")
+
+                if candidates:
+                    # Rank by conviction score descending
+                    candidates.sort(key=lambda x: x["conviction"], reverse=True)
+
+                    # Log full ranked list so you can see what was considered
+                    ranked_log = ", ".join(
+                        f"{c['symbol']}({c['conviction']:.0f})"
+                        for c in candidates
+                    )
+                    self.log_message(
+                        f"Candidates [{len(candidates)}] ranked: {ranked_log} | "
+                        f"slots free: {slots_free}/{max_pos}"
+                    )
+
+                    # Execute top candidates up to available slots
+                    executed = 0
+                    for c in candidates:
+                        if executed >= slots_free:
+                            self.log_message(
+                                f"SKIP {c['symbol']} (conviction:{c['conviction']:.0f}) "
+                                f"— max_positions ({max_pos}) reached"
+                            )
+                            continue
+                        # Re-check slot count in case a prior execution failed
+                        if len(self._positions) >= max_pos:
+                            break
+                        self._execute_candidate(c)
+                        executed += 1
 
     # ── Broker Position Sync ──────────────────────────────────────────────
 
@@ -310,12 +429,36 @@ class TrendFilteredORB(Strategy):
                     continue
                 avg_price = float(pos.avg_fill_price) if pos.avg_fill_price else 0.0
                 overnight = not is_leveraged(ticker)
+
+                # ── Restore stop/target from trade journal if available ────
+                # When the bot is restarted mid-position, the original ORB
+                # stop and target are in the journal. Fall back to simple
+                # percentage-based defaults only if no journal record exists.
+                stop   = avg_price * 0.95
+                target = avg_price * 1.10
+                try:
+                    row = self._journal.get_open_trade(ticker)
+                    if row:
+                        stop   = row.get("initial_stop",   stop)
+                        target = row.get("initial_target", target)
+                        self.log_message(
+                            f"Restored {ticker}: stop={stop:.2f} target={target:.2f} "
+                            f"(from journal)"
+                        )
+                    else:
+                        self.log_message(
+                            f"No journal record for {ticker} — using default "
+                            f"stop={stop:.2f} target={target:.2f}"
+                        )
+                except Exception:
+                    pass
+
                 self._positions[ticker] = {
                     "symbol":       ticker,
                     "direction":    "LONG",
                     "entry_price":  avg_price,
-                    "stop":         avg_price * 0.95,
-                    "target":       avg_price * 1.10,
+                    "stop":         stop,
+                    "target":       target,
                     "qty":          qty,
                     "entry_value":  self.portfolio_value,
                     "overnight_ok": overnight,
@@ -327,6 +470,8 @@ class TrendFilteredORB(Strategy):
                         f"⚠️  {ticker} is leveraged and open at market open "
                         f"— will close at EOD"
                     )
+            if synced:
+                self.log_message(f"Synced from Alpaca: {synced}")
             if synced:
                 self.log_message(f"Synced from Alpaca: {synced}")
         except Exception as e:
@@ -717,16 +862,32 @@ class TrendFilteredORB(Strategy):
         want_long  = action in ("BUY", "STRONG_BUY")
         want_short = action in ("SELL", "STRONG_SELL")
 
-        if hold_bias and not self.parameters.get("hold_override", False):
-            return
-
         pair   = get_leveraged_pair(symbol)
         direct = is_direct_trade(symbol)
 
+        # ── Bias gate ─────────────────────────────────────────────────────
+        # BUY / STRONG_BUY  → allow LONG entry on ORB breakout  (full size)
+        # HOLD              → allow LONG entry on ORB breakout  (half size via hold_override_size)
+        # SELL / STRONG_SELL → block LONG entries; allow SHORT entry only
+        #
+        # Previous behavior blocked HOLD entirely unless hold_override=True.
+        # New behavior: HOLD is always eligible for a LONG ORB entry —
+        # hold_override_size (default 0.5) applies automatically to reduce
+        # the position size to reflect lower conviction.
+        # SELL bias still blocks LONG entries unconditionally.
+        if want_short:
+            # SELL bias → only SHORT entries allowed, no LONG
+            if direct:
+                return None  # No inverse ETF for direct-trade symbols
+        elif not want_long and not hold_bias:
+            # Shouldn't happen, but guard against unknown action values
+            return None
+        # want_long or hold_bias → proceed to LONG entry check below
+
         if want_short and direct:
-            return
-        if len(self._positions) >= self.parameters["max_positions"]:
-            return
+            return None
+        # max_positions check moved to caller — we return a scored candidate
+        # so the caller can rank all candidates and execute the best ones.
 
         if want_long or hold_bias:
             direction   = "LONG"
@@ -736,11 +897,11 @@ class TrendFilteredORB(Strategy):
             exec_ticker = pair["bear"]
 
         if direction == "LONG" and pair["bear"] in self._positions:
-            return
+            return None
         if direction == "SHORT" and pair["bull"] in self._positions:
-            return
+            return None
         if exec_ticker in self._positions:
-            return
+            return None
 
         # ── Earnings filter ────────────────────────────────────────────────
         try:
@@ -751,7 +912,7 @@ class TrendFilteredORB(Strategy):
                     f"SKIP {symbol} — earnings in "
                     f"{info.get('hours_until','?')}h"
                 )
-                return
+                return None
         except Exception:
             pass  # If filter fails, allow trade through
 
@@ -763,12 +924,12 @@ class TrendFilteredORB(Strategy):
             }
         state = self._orb_state[symbol]
         if state["trade_taken"]:
-            return
+            return None
 
         # ── Fetch bars ─────────────────────────────────────────────────────
         bars = self.get_historical_prices(symbol, 20, "5m")
         if bars is None or len(bars.df) < 3:
-            return
+            return None
         df = bars.df.copy()
 
         try:
@@ -778,7 +939,7 @@ class TrendFilteredORB(Strategy):
             df_today = df[pd.to_datetime(df.index.date) == pd.Timestamp(today)]
 
         if len(df_today) < 3:
-            return
+            return None
 
         # ── Establish OR ───────────────────────────────────────────────────
         if not state["or_established"]:
@@ -793,6 +954,9 @@ class TrendFilteredORB(Strategy):
         # ── Regime check ───────────────────────────────────────────────────
         # In backtest mode, skip Ollama regime calls — assume moderate/neutral.
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
+            regime          = {"regime": "trending", "confidence": 0.5,
+                               "orb_suitability": "moderate",
+                               "stop_adjustment": 1.0, "target_adjustment": 1.0}
             regime_type     = "trending"
             regime_conf     = 0.5
             orb_suitability = "moderate"
@@ -810,16 +974,16 @@ class TrendFilteredORB(Strategy):
 
             if regime_type == "low_liquidity" and regime_conf >= 0.70:
                 self.log_message(f"SKIP {symbol} — low liquidity regime")
-                return
+                return None
 
         # ── Check breakout ─────────────────────────────────────────────────
         is_long_break  = current > state["or_high"]
         is_short_break = current < state["or_low"]
 
         if want_long and not is_long_break:
-            return
+            return None
         if want_short and not is_short_break:
-            return
+            return None
         if hold_bias:
             if is_long_break:
                 direction   = "LONG"
@@ -828,11 +992,11 @@ class TrendFilteredORB(Strategy):
                 direction   = "SHORT"
                 exec_ticker = pair["bear"]
             else:
-                return
+                return None
 
         if orb_suitability == "poor" and regime_conf >= 0.70:
             self.log_message(f"SKIP {symbol} — poor regime for ORB")
-            return
+            return None
 
         # ── AI grading (skipped in backtest mode) ─────────────────────────
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
@@ -853,7 +1017,7 @@ class TrendFilteredORB(Strategy):
                 f"SKIP {symbol} — AI {grading['confidence']:.2f} | "
                 f"{grading.get('reasoning','')[:80]}"
             )
-            return
+            return None
 
         # ── Dynamic sizing ─────────────────────────────────────────────────
         base_risk    = self.parameters["risk_pct"]
@@ -866,7 +1030,7 @@ class TrendFilteredORB(Strategy):
 
         risk_dist = abs(current - state["or_mid"]) * stop_adj
         if risk_dist <= 0:
-            return
+            return None
 
         if direction == "LONG":
             initial_stop   = current - risk_dist
@@ -877,11 +1041,86 @@ class TrendFilteredORB(Strategy):
 
         qty = int((self.portfolio_value * effective_risk) / risk_dist)
         if qty < 1:
-            return
+            return None
 
-        # ── Submit ─────────────────────────────────────────────────────────
+        # ── Conviction score for ranking ───────────────────────────────────
+        # Higher = higher priority when max_positions would be exceeded.
+        bull_score = bias.get("bull_score", 0) if direction == "LONG" else bias.get("bear_score", 0)
+        vol_ratio  = bias.get("vol_ratio", 1.0)
+        action_bonus = 1 if action in ("STRONG_BUY", "STRONG_SELL") else 0
+        conviction = (
+            grading["confidence"] * 40        # 0–40  (AI confidence weighted highest)
+            + bull_score * 8                  # 0–40  (signal strength)
+            + min(vol_ratio - 1.0, 1.0) * 10  # 0–10  (volume confirmation, capped at 2x)
+            + action_bonus * 10               # 0–10  (STRONG signal bonus)
+        )  # Base: 0–100
+
+        # Pre-market boost: gap alignment, news sentiment, LLM sentiment signal
+        # Only applies when direction aligns with the pre-market signal
+        if _PREMARKET_AVAILABLE:
+            try:
+                pm_boost = premarket_conviction_boost(bias)
+                gap_signal = bias.get("gap_signal", "FLAT")
+                sentiment_signal = bias.get("sentiment_signal", "HOLD")
+
+                # Apply boost if pre-market agrees with our direction
+                gap_aligned  = (direction == "LONG" and gap_signal == "GAP_UP") or \
+                               (direction == "SHORT" and gap_signal == "GAP_DOWN")
+                sentiment_aligned = (direction == "LONG" and sentiment_signal == "LONG") or \
+                               (direction == "SHORT" and sentiment_signal == "SHORT")
+
+                if gap_aligned or sentiment_aligned:
+                    conviction += pm_boost
+                elif gap_signal != "FLAT" and not gap_aligned:
+                    # Gap is working against us — reduce conviction
+                    conviction -= pm_boost * 0.5
+            except Exception:
+                pass  # Never let boost calculation block a trade
+
+        # Return candidate — caller decides whether to execute based on ranking
+        return {
+            "symbol":          symbol,
+            "exec_ticker":     exec_ticker,
+            "direction":       direction,
+            "current":         current,
+            "qty":             qty,
+            "initial_stop":    initial_stop,
+            "initial_target":  initial_target,
+            "effective_risk":  effective_risk,
+            "size_mult":       size_mult,
+            "hold_bias":       hold_bias,
+            "conviction":      conviction,
+            "grading":         grading,
+            "regime":          regime,
+            "regime_type":     regime_type,
+            "orb_suitability": orb_suitability,
+            "stop_adj":        stop_adj,
+            "target_adj":      target_adj,
+            "bias":            bias,
+            "action":          action,
+            "state":           state,
+            "direct":          direct,
+            "df_today":        df_today,
+        }
+
+    def _execute_candidate(self, c: dict):
+        """Submit a pre-scored trade candidate returned by _process_symbol."""
+        symbol      = c["symbol"]
+        exec_ticker = c["exec_ticker"]
+        direction   = c["direction"]
+        current     = c["current"]
+        qty         = c["qty"]
+        grading     = c["grading"]
+        regime      = c["regime"]
+        bias        = c["bias"]
+        action      = c["action"]
+        hold_bias   = c["hold_bias"]
+        state       = c["state"]
+        direct      = c["direct"]
+
         try:
-            order = self.create_order(exec_ticker, qty, "buy",
+            order = self.create_order(exec_ticker, qty,
+                                      "buy" if direction == "LONG" else "sell",
                                       time_in_force="day")
             self.submit_order(order)
         except Exception as e:
@@ -894,23 +1133,23 @@ class TrendFilteredORB(Strategy):
             symbol=symbol, exec_ticker=exec_ticker,
             direction=direction, entry_price=current, quantity=qty,
             or_high=state["or_high"], or_low=state["or_low"],
-            or_mid=state["or_mid"], initial_stop=initial_stop,
-            initial_target=initial_target, risk_pct=effective_risk,
+            or_mid=state["or_mid"], initial_stop=c["initial_stop"],
+            initial_target=c["initial_target"], risk_pct=c["effective_risk"],
             signal_action=action, signal_source="technical+ORB",
             bull_score=bias.get("bull_score", 0),
             bear_score=bias.get("bear_score", 0),
             signal_rsi=bias.get("rsi", 50),
             signal_vol_ratio=bias.get("vol_ratio", 1.0),
             ai_confidence=grading["confidence"],
-            ai_size_mult=size_mult,
+            ai_size_mult=c["size_mult"],
             ai_flags=grading.get("flags", []),
             ai_vol_quality=grading.get("volume_quality", "unknown"),
             ai_pa_quality=grading.get("price_action_quality", "unknown"),
             ai_approved=grading.get("approve", True),
             regime=regime.get("regime", "unknown"),
             regime_conf=regime.get("confidence", 0.5),
-            orb_suitability=orb_suitability,
-            stop_adjustment=stop_adj, target_adjustment=target_adj,
+            orb_suitability=c["orb_suitability"],
+            stop_adjustment=c["stop_adj"], target_adjustment=c["target_adj"],
             portfolio_value=self.portfolio_value,
             open_positions=len(self._positions),
         )
@@ -919,8 +1158,8 @@ class TrendFilteredORB(Strategy):
             "symbol":       symbol,
             "direction":    direction,
             "entry_price":  current,
-            "stop":         initial_stop,
-            "target":       initial_target,
+            "stop":         c["initial_stop"],
+            "target":       c["initial_target"],
             "qty":          qty,
             "entry_value":  self.portfolio_value,
             "overnight_ok": overnight_eligible,
@@ -928,13 +1167,14 @@ class TrendFilteredORB(Strategy):
         self._trade_ids[exec_ticker] = trade_id
         state["trade_taken"] = True
 
-        tag   = "HOLD-OVERRIDE " if hold_bias else ""
+        tag   = "HOLD-BIAS " if hold_bias else ""
         o_tag = " [OVERNIGHT]" if overnight_eligible else " [EOD]"
         msg   = (
             f"{tag}ENTRY {direction} | {symbol}→{exec_ticker} x{qty} "
-            f"@ {current:.2f} | Stop:{initial_stop:.2f} "
-            f"Target:{initial_target:.2f} | "
-            f"AI:{grading['confidence']:.2f}({size_mult:.1f}x) | "
+            f"@ {current:.2f} | Stop:{c['initial_stop']:.2f} "
+            f"Target:{c['initial_target']:.2f} | "
+            f"AI:{grading['confidence']:.2f}({c['size_mult']:.1f}x) | "
+            f"Conviction:{c['conviction']:.0f} | "
             f"Regime:{regime.get('regime','?')}{o_tag}"
         )
         self.log_message(msg)
@@ -967,11 +1207,17 @@ class TrendFilteredORB(Strategy):
         except FileNotFoundError:
             return ["QQQ"]
 
+    def _bias_path(self) -> str:
+        if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
+            return BIAS_CACHE_BACKTEST
+        return BIAS_CACHE
+
     def _load_bias(self) -> dict:
         try:
             os.makedirs("cache", exist_ok=True)
-            if os.path.exists(BIAS_CACHE):
-                with open(BIAS_CACHE) as f:
+            path = self._bias_path()
+            if os.path.exists(path):
+                with open(path) as f:
                     return json.load(f)
         except Exception:
             pass
@@ -980,7 +1226,7 @@ class TrendFilteredORB(Strategy):
     def _save_bias(self, bias: dict):
         try:
             os.makedirs("cache", exist_ok=True)
-            with open(BIAS_CACHE, "w") as f:
+            with open(self._bias_path(), "w") as f:
                 json.dump(bias, f, indent=2)
         except Exception as e:
             self.log_message(f"Bias save failed: {e}")

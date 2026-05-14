@@ -319,6 +319,25 @@ class TradeJournal:
             ))
             conn.commit()
 
+    def get_open_trade(self, exec_ticker: str) -> Optional[dict]:
+        """
+        Return the most recent unclosed trade record for exec_ticker, or None.
+        Used by _sync_positions_from_broker to restore original stop/target
+        after a bot restart.
+        """
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT initial_stop, initial_target, entry_price, quantity,
+                       or_high, or_low, or_mid, regime, ai_confidence,
+                       signal_action, direction
+                FROM trades
+                WHERE exec_ticker = ?
+                  AND exit_time IS NULL
+                ORDER BY id DESC
+                LIMIT 1
+            """, (exec_ticker,)).fetchone()
+        return dict(row) if row else None
+
     def get_stats(self, days: int = 30) -> dict:
         """Return performance stats for the last N days."""
         with self._connect() as conn:
