@@ -1,16 +1,24 @@
-# Never commit these
+# Secrets
 .env
+
+# Virtual environment
 venv/
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
-.next/
-*.db
-*.sqlite
-logs/
-*.log
+*.pyd
 
-# LumiBot cache
-data/
-backtesting_cache/
-tearsheets/
+# Runtime/generated data
+cache/
+logs/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Misc
+structure.txt
+*.db
