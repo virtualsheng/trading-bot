@@ -2,51 +2,42 @@
 title ORB Trading Bot Launcher
 
 :: ── Configuration ────────────────────────────────────────────────────────────
-:: Project root (folder containing runners/, cache/, symbols.txt, etc.)
 set PROJECT_ROOT=%~dp0
-
-:: Path to Sentiment-Trading-Alpha repo root (contains run.py)
 set SENTIMENT_ROOT=C:\Users\sheng\Documents\Sentiment-Trading-Alpha
-
-:: Python executable
 set PYTHON=python
-
-:: Dashboard port
 set DASHBOARD_PORT=5001
 
 :: Sentiment-Trading-Alpha credentials
-:: Must match SENTIMENT_ADMIN_TOKEN in trading-bot .env
 set ADMIN_API_TOKEN=9kvzQLgoE25NQd1GGGL31N1r7W4hiDBLfQ9XXqByEwHj
 set INGESTION_STARTUP_GRACE_SECONDS=20
+
+:: STA internal pipeline timeout in seconds (default is 420 — too short for
+:: 0xroyce/plutus:latest on first run). 900 = 15 minutes gives plenty of room.
+:: Confirmed env var from STA source: _analysis_timeout_seconds() reads this.
+set ANALYSIS_TIMEOUT_SECONDS=900
 
 :: ── Banner ────────────────────────────────────────────────────────────────────
 echo.
 echo  ================================================
-echo    ORB Trading Bot  ^|  v8
+echo    ORB Trading Bot  ^|  v9
 echo  ================================================
 echo.
 
-:: ── Check Python ─────────────────────────────────────────────────────────────
+:: ── Checks ───────────────────────────────────────────────────────────────────
 %PYTHON% --version >nul 2>&1
 if errorlevel 1 (
-    echo  ERROR: Python not found. Make sure Python is in your PATH.
-    pause
-    exit /b 1
+    echo  ERROR: Python not found.
+    pause & exit /b 1
 )
 
-:: ── Check Sentiment-Trading-Alpha repo ───────────────────────────────────────
 if not exist "%SENTIMENT_ROOT%\run.py" (
-    echo  ERROR: Sentiment-Trading-Alpha not found at:
-    echo         %SENTIMENT_ROOT%\run.py
-    echo.
-    echo  Update SENTIMENT_ROOT at the top of this file to the correct path.
-    pause
-    exit /b 1
+    echo  ERROR: Sentiment-Trading-Alpha not found at %SENTIMENT_ROOT%\run.py
+    echo  Update SENTIMENT_ROOT at the top of this file.
+    pause & exit /b 1
 )
 
-:: ── Activate trading-bot venv ─────────────────────────────────────────────────
+:: ── Activate venv ─────────────────────────────────────────────────────────────
 if exist "%PROJECT_ROOT%venv\Scripts\activate.bat" (
-    echo  Activating virtual environment...
     call "%PROJECT_ROOT%venv\Scripts\activate.bat"
 ) else if exist "%PROJECT_ROOT%.venv\Scripts\activate.bat" (
     call "%PROJECT_ROOT%.venv\Scripts\activate.bat"
@@ -54,7 +45,6 @@ if exist "%PROJECT_ROOT%venv\Scripts\activate.bat" (
     echo  No venv found — using system Python
 )
 
-:: ── Change to project root ────────────────────────────────────────────────────
 cd /d "%PROJECT_ROOT%"
 
 echo.
@@ -63,37 +53,34 @@ echo    1. Sentiment-Trading-Alpha backend  ^(http://localhost:8000^)
 echo    2. ORB Dashboard                   ^(http://localhost:%DASHBOARD_PORT%^)
 echo    3. ORB Trading Bot
 echo.
-echo  Each opens in its own window. Close any window to stop that process.
+echo  STA pipeline timeout: %ANALYSIS_TIMEOUT_SECONDS%s
+echo  ^(increased from default 420s to handle 0xroyce/plutus on first run^)
 echo.
 
-:: ── 1. Launch Sentiment-Trading-Alpha backend ─────────────────────────────────
-:: Sets env vars only in the new window — does not affect this or other windows.
-start "Sentiment-Trading-Alpha Backend  [port 8000]" cmd /k "SET ADMIN_API_TOKEN=%ADMIN_API_TOKEN% && SET INGESTION_STARTUP_GRACE_SECONDS=%INGESTION_STARTUP_GRACE_SECONDS% && cd /d %SENTIMENT_ROOT% && %PYTHON% run.py"
+:: ── 1. Start STA backend ─────────────────────────────────────────────────────
+:: ANALYSIS_TIMEOUT_SECONDS tells STA's pipeline to wait up to 900s before
+:: giving up, instead of the default 420s.
+start "Sentiment-Trading-Alpha Backend  [port 8000]" cmd /k "SET ADMIN_API_TOKEN=%ADMIN_API_TOKEN% && SET INGESTION_STARTUP_GRACE_SECONDS=%INGESTION_STARTUP_GRACE_SECONDS% && SET ANALYSIS_TIMEOUT_SECONDS=%ANALYSIS_TIMEOUT_SECONDS% && cd /d %SENTIMENT_ROOT% && %PYTHON% run.py"
 
-:: ── Wait for STA backend to initialize ───────────────────────────────────────
-:: First run: DB migration + ingestion worker startup takes ~10-15s.
-:: The trading bot's background thread handles the actual 2-4 min analysis
-:: pipeline — the bot doesn't block on it.
 echo  Waiting 20 seconds for Sentiment-Trading-Alpha to initialize...
 timeout /t 20 /nobreak >nul
 
-:: ── 2. Launch dashboard ───────────────────────────────────────────────────────
+:: ── 2. Start dashboard ───────────────────────────────────────────────────────
 start "ORB Dashboard  [port %DASHBOARD_PORT%]" cmd /k "%PYTHON% runners\dashboard_server.py"
-
 timeout /t 2 /nobreak >nul
 
-:: ── 3. Launch trading bot ─────────────────────────────────────────────────────
+:: ── 3. Start trading bot ─────────────────────────────────────────────────────
 start "ORB Trading Bot" cmd /k "%PYTHON% runners\run_live_combined.py"
 
 :: ── Open browser ─────────────────────────────────────────────────────────────
 timeout /t 4 /nobreak >nul
 start "" "http://localhost:%DASHBOARD_PORT%"
 
+echo.
 echo  All 3 processes started.
 echo.
 echo  Sentiment Alpha : http://localhost:8000
 echo  Dashboard       : http://localhost:%DASHBOARD_PORT%
 echo.
-echo  Press any key to close this launcher window.
-echo  (All processes keep running in their own windows.)
+echo  Press any key to close this launcher.
 pause >nul

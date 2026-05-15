@@ -30,6 +30,15 @@ v8 changes:
   - FINAL EOD signals via after_market_closes() lifecycle hook
   - File logging only (no duplicate StreamHandler)
   - Sentiment URL corrected to /api/v1/analyze
+
+run_live_combined.py — Launch the Trend-Filtered ORB Strategy v9
+──────────────────────────────────────────────────────────────────
+v9 changes:
+  - sleeptime_orb = "2M" — 2-min iterations during 9:45 AM–noon ORB window
+  - sleeptime_default = "5M" — 5-min iterations outside ORB window
+  - after_market_closes delay = 5 min — waits for official close prices to settle
+  - All order direction bugs fixed (always BUY, never short-sell)
+  - File logging only (no duplicate StreamHandler)
 """
 
 import os
@@ -40,7 +49,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── File logging only — LumiBot's own StreamHandler handles console ───────────
-# Do NOT add a StreamHandler here — adding a second one doubles every log line.
 os.makedirs("logs", exist_ok=True)
 _log_file     = f"logs/bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 _file_handler = logging.FileHandler(_log_file, encoding="utf-8")
@@ -74,6 +82,19 @@ def main():
     }
 
     PARAMS = {
+        # ── Iteration speed ───────────────────────────────────────────────
+        # 2-min iterations during the ORB entry window (9:45 AM – noon)
+        # 5-min iterations the rest of the day
+        "sleeptime_orb":     "2M",
+        "sleeptime_default": "5M",
+
+        # ── EOD signal delay ──────────────────────────────────────────────
+        # after_market_closes() waits this many minutes before running FINAL
+        # signals. Official closing prices on Alpaca can lag 1-3 min after
+        # 4:00 PM — waiting 5 min ensures prices are settled.
+        "after_close_delay_minutes": 5,
+
+        # ── Strategy ──────────────────────────────────────────────────────
         "orb_minutes":        15,
         "bar_minutes":        5,
         "risk_pct":           0.01,
@@ -109,7 +130,7 @@ def main():
     swing_mode           = PARAMS["swing_mode"]
 
     print("\n" + "=" * 70)
-    print("  🚀  TREND-FILTERED ORB — AI-ENHANCED LIVE STRATEGY  v8")
+    print("  🚀  TREND-FILTERED ORB — AI-ENHANCED LIVE STRATEGY  v9")
     print("=" * 70)
     print(f"  Mode              : {mode}")
     print(f"  Symbols           : symbols.txt ({_count_symbols()} symbols)")
@@ -126,6 +147,9 @@ def main():
         print(f"  Sell Cooldown     : {PARAMS['swing_sell_cooldown_days']}d")
         print(f"  Force-Sell Conv.  : {PARAMS['swing_force_sell_conviction']}")
         print(f"  Force-Sell Bear≥  : {PARAMS['swing_force_sell_bear_score']}")
+    print(f"  ORB Iteration     : {PARAMS['sleeptime_orb']} (9:45 AM–noon)")
+    print(f"  Off-ORB Iteration : {PARAMS['sleeptime_default']}")
+    print(f"  After-Close Delay : {PARAMS['after_close_delay_minutes']} min (waits for close prices)")
     print(f"  Ollama Model      : llama3.2:3b (localhost:11434)")
     print(f"  Trade Journal     : cache/trade_journal.db")
     print(f"  Log File          : {_log_file}")
@@ -133,34 +157,31 @@ def main():
           f"({'token set ✅' if sentiment_configured else 'no token ⚠️'})")
     print("=" * 70)
     print()
+    print("  Trade model: ALWAYS BUY — never short-sell")
+    print("  • BUY signal  → BUY bull leveraged ETF (e.g. QQQ→TQQQ)")
+    print("  • SELL signal → BUY inverse ETF (e.g. IBIT→BITI) if one exists")
+    print("  • SELL signal + no inverse ETF → skip (e.g. RKLB, URA)")
+    print("  • HOLD signal → BUY bull ETF only on upside breakout (0.5× size)")
+    print()
     print("  Daily schedule:")
     print("  • Script start    — Ollama warmup (model loaded immediately)")
     print("  • ~9:00 AM ET     — Earnings cache cleared, regime pre-warmed")
     print("  • 9:30 AM ET      — Position sync from Alpaca")
-    print("  • 9:45 AM – noon  — ORB entries (BUY bias OR confirmed HOLD breakout)")
-    print("  • Every 30 min    — Regime detection refresh")
-    print("  • 3:45 PM ET      — Leveraged ETFs closed")
-    print("  • 3:50 PM ET      — PRELIM signals (prelim close prices)")
-    print("                      → SELL signals acted on immediately")
-    print("  • ~4:00 PM ET     — FINAL signals via after_market_closes()")
-    print("                      → Official close prices, SELL signals acted on")
+    print("  • 9:45 AM – noon  — ORB entries (2-min iterations)")
+    print("  • Noon – 3:45 PM  — Monitor only (5-min iterations)")
+    print("  • 3:45 PM ET      — Leveraged/inverse ETFs closed")
+    print("  • 3:50 PM ET      — PRELIM signals → SELL signals acted on")
+    print("  • ~4:05 PM ET     — FINAL signals via after_market_closes()")
+    print("                      (5-min delay for closing prices to settle)")
     if swing_mode:
-        print("  • Overnight        — All positions held (swing mode)")
+        print("  • Overnight        — All direct-trade positions held")
     else:
-        print("  • Overnight        — Non-leveraged positions held until SELL signal")
+        print("  • Overnight        — Direct-trade positions held until SELL signal")
     print()
-    print("  ORB entry logic:")
-    print("  • BUY/STRONG_BUY bias  → enter on confirmed breakout above OR High")
-    print("  • HOLD bias            → enter on confirmed breakout above OR High (0.5x size)")
-    print("  • SELL/STRONG_SELL     → entry blocked for LONG; SHORT only (leveraged pair)")
-    print("  • No entry if price is inside the opening range (WAIT state)")
-    print()
-    print("  Off-hours: bot sleeps — no API calls, no log noise")
     print("  To stop: Ctrl+C")
     print("=" * 70 + "\n")
 
     print("  🔄 Running startup refresh (bias + earnings cache)...")
-    print("     This ensures signals are current regardless of start time.")
     print()
     strategy.startup_refresh()
 
