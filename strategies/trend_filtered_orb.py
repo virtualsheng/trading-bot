@@ -1368,6 +1368,9 @@ class TrendFilteredORB(Strategy):
     def _notify(self, subject: str, body: str):
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
             return
+        # Ensure every notification has the Trade-Bot: prefix
+        if not subject.startswith("Trade-Bot:"):
+            subject = f"Trade-Bot: {subject}"
         full = f"{subject}\n{body}"
         try: send_email(subject, body)
         except Exception: pass
