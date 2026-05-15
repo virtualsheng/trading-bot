@@ -7,26 +7,15 @@ Provides three capabilities:
   3. trade_narrator:   Generates a plain-English journal entry for a trade
 
 Uses Ollama running locally — no API key needed, no cost.
-Default model: llama3.2:3b (fast, low RAM — swap for qwen3:8b for better reasoning)
+Default model: llama3.2:3b (fast, low RAM)
 Fallback: returns neutral scores if Ollama is unreachable.
 
-Reliability fixes (v2):
-  - check_ollama_available() warms up with a realistic regime-style prompt
-    so the model KV cache is primed before the first detect_regime() call.
-  - _call_ollama() retries up to MAX_RETRIES times with exponential backoff
-    (2s → 4s) before giving up and using fallback defaults.
-  - detect_regime() uses timeout=30 (longer than per-trade grade_setup).
-  - TIMEOUT raised to 25s (from 15s) to reduce first-attempt timeouts on
-    machines running llama3.2:3b or qwen3:8b.
-
-Reliability fixes (v3):
-  - check_ollama_available() warms up with a realistic regime-style prompt
-    so the model KV cache is primed before the first detect_regime() call.
-  - _call_ollama() retries up to MAX_RETRIES times with exponential backoff.
-  - TIMEOUT raised to 25s (from 15s).
-  - detect_regime() uses fmt_bars([-5:]) instead of [-10:] — smaller prompt
-    generates faster, eliminating the 30s timeout on llama3.2:3b.
-    Trend direction is readable from 5 bars per timeframe.
+Reliability:
+  - Warmup with realistic regime prompt primes KV cache before first detect_regime()
+  - Retry up to MAX_RETRIES times with exponential backoff on timeout
+  - TIMEOUT = 25s (raised from 15s) — reduces first-attempt misses
+  - detect_regime() uses 5 bars per timeframe in prompt (reduced from 10)
+    to halve generation time on llama3.2:3b, eliminating 30s timeouts
 """
 
 import json
@@ -34,28 +23,21 @@ import time
 import requests
 from typing import Optional
 
-# ── Config ────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 OLLAMA_URL   = "http://localhost:11434/api/generate"
 OLLAMA_TAGS  = "http://localhost:11434/api/tags"
 OLLAMA_MODEL = "llama3.2:3b"
+TIMEOUT      = 25    # per-trade timeout; detect_regime() uses 30s override
+MAX_RETRIES  = 2     # total attempts = 1 + MAX_RETRIES = 3
 
-# Per-trade grading timeout. 25s eliminates most first-attempt timeouts
-# on machines where generation takes 18–22s.
-# detect_regime() overrides this with timeout=30 since it runs at open.
-TIMEOUT     = 25
-
-# Retry on timeout: 1 + MAX_RETRIES total attempts, backoff 2s → 4s.
-MAX_RETRIES = 2
-
-# Set False if Ollama is confirmed unreachable at startup.
-_ollama_available = None
+_ollama_available = None  # None = not yet checked
 
 
 def check_ollama_available() -> bool:
     """
     Check if Ollama is running and the model is loaded.
-    Warms up with a regime-shaped prompt to prime the KV cache before
-    the first real detect_regime() call fires at market open.
+    Warms up with a regime-shaped prompt to prime the KV cache so the
+    first real detect_regime() call is fast.
     """
     global _ollama_available
     try:
@@ -68,10 +50,7 @@ def check_ollama_available() -> bool:
         models     = [m.get("name", "") for m in resp.json().get("models", [])]
         model_base = OLLAMA_MODEL.split(":")[0]
         if not any(model_base in m for m in models):
-            print(
-                f"[ai_engine] Model '{OLLAMA_MODEL}' not found. "
-                f"Run: ollama pull {OLLAMA_MODEL}"
-            )
+            print(f"[ai_engine] Model '{OLLAMA_MODEL}' not found. Run: ollama pull {OLLAMA_MODEL}")
             _ollama_available = False
             return False
 
@@ -115,7 +94,7 @@ def check_ollama_available() -> bool:
 
 def _call_ollama(prompt: str, model: str = OLLAMA_MODEL,
                  timeout: int = None) -> Optional[str]:
-    """Raw Ollama call with retry on timeout."""
+    """Raw Ollama call with exponential backoff retry on timeout."""
     global _ollama_available
     if _ollama_available is False:
         return None
@@ -186,7 +165,7 @@ def _parse_json_from_response(text: str) -> dict:
         return {}
 
 
-# ── Fallbacks ──────────────────────────────────────────────────────────────
+# ── Fallbacks ─────────────────────────────────────────────────────────────────
 
 _GRADE_FALLBACK = {
     "confidence":           0.60,
@@ -208,7 +187,7 @@ _REGIME_FALLBACK = {
 }
 
 
-# ── 1. Setup Grader ────────────────────────────────────────────────────────
+# ── 1. Setup Grader ───────────────────────────────────────────────────────────
 
 def grade_setup(
     symbol: str,
@@ -282,7 +261,7 @@ def _confidence_to_size(confidence: float) -> float:
     return 0.0
 
 
-# ── 2. Regime Detector ─────────────────────────────────────────────────────
+# ── 2. Regime Detector ────────────────────────────────────────────────────────
 
 REGIME_CACHE = {}
 
@@ -297,18 +276,14 @@ def detect_regime(
 ) -> dict:
     """
     Classify market regime from multi-timeframe bar data.
-
-    Uses only the last 5 bars per timeframe in the prompt (down from 10).
-    Smaller prompt = faster generation on llama3.2:3b, eliminating 30s timeouts.
-    Five bars is sufficient for trend direction — we don't need 10+ bars for
-    a simple regime classification.
+    Uses 5 bars per timeframe in the prompt (trimmed from whatever is passed in)
+    to keep prompt size small and generation fast on llama3.2:3b.
     """
     def fmt_bars(bars: list, label: str) -> str:
         if not bars:
             return f"  {label}: (no data)"
         lines = [f"  {label}:"]
-        # ← 5 bars instead of 10 — keeps prompt small and fast
-        for b in bars[-5:]:
+        for b in bars[-5:]:   # 5 bars per timeframe — keeps prompt fast
             lines.append(
                 f"    O:{b['o']:.2f} H:{b['h']:.2f} "
                 f"L:{b['l']:.2f} C:{b['c']:.2f} V:{int(b.get('v', 0))}"
@@ -336,8 +311,6 @@ Return ONLY this JSON (no markdown):
   "reasoning": "<1-2 sentences>"
 }}"""
 
-    # Regime calls get 30s timeout (vs 25s for per-trade grading).
-    # Runs at market open and every 30 min — latency here is acceptable.
     response = _call_ollama(prompt, timeout=30)
     data     = _parse_json_from_response(response)
 
@@ -352,7 +325,7 @@ def get_cached_regime(symbol: str) -> dict:
     return REGIME_CACHE.get(symbol, _REGIME_FALLBACK.copy())
 
 
-# ── 3. Trade Narrator ──────────────────────────────────────────────────────
+# ── 3. Trade Narrator ─────────────────────────────────────────────────────────
 
 def narrate_trade(trade_record: dict) -> str:
     """Generate a plain-English journal entry for a completed trade."""

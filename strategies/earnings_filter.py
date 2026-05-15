@@ -10,16 +10,18 @@ gaps -10% on earnings = -30% overnight, far beyond any intraday stop.
 Data source: Yahoo Finance earnings calendar (free, no API key needed).
 Falls back to allowing the trade if the calendar can't be fetched.
 
-Usage:
-    from strategies.earnings_filter import is_earnings_safe
-
-    if not is_earnings_safe(symbol):
-        return  # Skip — earnings within 48 hours
+v2 fix: "No earnings dates found" logged at DEBUG instead of ERROR.
+  ETFs and most macro/commodity symbols never have earnings — logging
+  this at ERROR level was noise. Changed to debug so it only appears
+  when VERBOSE logging is enabled.
 """
 
 import datetime
+import logging
 import pytz
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Cache earnings dates per symbol per day to avoid repeated yfinance calls
 # Format: {"NVDA": {"fetched": date, "next_earnings": date_or_None}}
@@ -38,28 +40,32 @@ def _get_next_earnings_date(symbol: str) -> Optional[datetime.date]:
     """
     Fetch the next earnings date for a symbol from Yahoo Finance.
     Returns None if unavailable or if the symbol has no upcoming earnings.
+
+    Logs at DEBUG level (not ERROR) when no earnings are found — ETFs and
+    commodity/macro symbols legitimately have no earnings schedule.
     """
     try:
         import yfinance as yf
         ticker = yf.Ticker(symbol)
 
-        # yfinance provides earnings dates in .earnings_dates
-        # This is a DataFrame indexed by date — most recent first
         cal = ticker.earnings_dates
         if cal is None or cal.empty:
+            # ETFs, commodities, leveraged products — expected, not an error
+            logger.debug(f"{symbol}: No earnings dates found (ETF or no earnings schedule)")
             return None
 
         today = _today_et()
-        # Filter to future dates only (including today)
         future = cal[cal.index.date >= today]  # type: ignore
         if future.empty:
+            logger.debug(f"{symbol}: No future earnings dates found")
             return None
 
         # The nearest upcoming earnings date
         next_date = future.index[-1].date()  # last = earliest future
         return next_date
 
-    except Exception:
+    except Exception as e:
+        logger.debug(f"{symbol}: Earnings calendar fetch failed ({e}) — allowing trade")
         return None
 
 
@@ -89,10 +95,10 @@ def is_earnings_safe(
         if cached["fetched"] == today:
             next_earnings = cached["next_earnings"]
             if next_earnings is None:
-                return True  # No upcoming earnings
-            now_et = datetime.datetime.now(_ET).replace(tzinfo=None)
-            earnings_dt = datetime.datetime.combine(next_earnings, datetime.time(16, 0))
-            delta = earnings_dt - now_et
+                return True
+            now_et        = datetime.datetime.now(_ET).replace(tzinfo=None)
+            earnings_dt   = datetime.datetime.combine(next_earnings, datetime.time(16, 0))
+            delta         = earnings_dt - now_et
             return delta.total_seconds() > buffer_hours * 3600
 
     # Fetch fresh
@@ -100,15 +106,14 @@ def is_earnings_safe(
 
     # Store in cache
     _earnings_cache[symbol] = {
-        "fetched":        today,
-        "next_earnings":  next_earnings,
+        "fetched":       today,
+        "next_earnings": next_earnings,
     }
 
     if next_earnings is None:
         return True  # No earnings data = safe to trade
 
-    # Calculate hours until earnings (assume 4pm ET report time)
-    now_et = datetime.datetime.now(_ET).replace(tzinfo=None)
+    now_et      = datetime.datetime.now(_ET).replace(tzinfo=None)
     earnings_dt = datetime.datetime.combine(next_earnings, datetime.time(16, 0))
     hours_until = (earnings_dt - now_et).total_seconds() / 3600
 
@@ -116,21 +121,17 @@ def is_earnings_safe(
         # Earnings was today/already passed — check if within 4 hours after
         return abs(hours_until) > 4
 
-    safe = hours_until > buffer_hours
-    return safe
+    return hours_until > buffer_hours
 
 
 def get_earnings_info(symbol: str) -> dict:
-    """
-    Return earnings calendar info for a symbol.
-    Useful for logging/debugging.
-    """
+    """Return earnings calendar info for a symbol (for logging/debugging)."""
     next_earnings = _get_next_earnings_date(symbol)
 
     if next_earnings is None:
         return {"symbol": symbol, "next_earnings": None, "hours_until": None, "safe": True}
 
-    now_et = datetime.datetime.now(_ET).replace(tzinfo=None)
+    now_et      = datetime.datetime.now(_ET).replace(tzinfo=None)
     earnings_dt = datetime.datetime.combine(next_earnings, datetime.time(16, 0))
     hours_until = (earnings_dt - now_et).total_seconds() / 3600
 
@@ -154,24 +155,32 @@ def prefetch_earnings(symbols: list):
     Fires _get_next_earnings_date() for each symbol so the results are
     cached before the first trade check, avoiding per-symbol fetch latency
     during the ORB window.
+
+    Suppresses stdout noise from yfinance during fetch — only prints a
+    clean summary line at the end.
     """
     import sys, io
     upcoming = []
     for symbol in symbols:
         try:
-            _stdout = sys.stdout
+            _stdout   = sys.stdout
             sys.stdout = io.StringIO()
-            date = _get_next_earnings_date(symbol)
+            date      = _get_next_earnings_date(symbol)
             sys.stdout = _stdout
+            # Cache the result
+            _earnings_cache[symbol] = {
+                "fetched":       _today_et(),
+                "next_earnings": date,
+            }
             if date:
                 upcoming.append(f"{symbol}:{date}")
         except Exception:
             try:
-                sys.stdout = _stdout
+                sys.stdout = _stdout  # type: ignore
             except Exception:
                 pass
 
     if upcoming:
         print(f"[startup] Earnings alerts: {', '.join(upcoming)}")
     else:
-        print(f"[startup] Earnings cache ready — no imminent reports found")
+        print("[startup] Earnings cache ready — no imminent reports found")

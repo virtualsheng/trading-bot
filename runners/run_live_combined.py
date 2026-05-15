@@ -27,10 +27,9 @@ Logging fix (v7):
 run_live_combined.py — Launch the Trend-Filtered ORB Strategy v8
 ──────────────────────────────────────────────────────────────────
 v8 changes:
-  - FINAL EOD signals now run via after_market_closes() lifecycle hook
-    (fixes the bug where LumiBot blocked on_trading_iteration after 4:03 PM)
-  - SENTIMENT_ENDPOINT shown in startup banner for easy debugging
+  - FINAL EOD signals via after_market_closes() lifecycle hook
   - File logging only (no duplicate StreamHandler)
+  - Sentiment URL corrected to /api/v1/analyze
 """
 
 import os
@@ -40,9 +39,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
-# ── File logging only (console handled by LumiBot's own handler) ──────────
-# Do NOT add a StreamHandler here — LumiBot already configures one and
-# adding a second causes every log line to appear twice in the console.
+# ── File logging only — LumiBot's own StreamHandler handles console ───────────
+# Do NOT add a StreamHandler here — adding a second one doubles every log line.
 os.makedirs("logs", exist_ok=True)
 _log_file     = f"logs/bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 _file_handler = logging.FileHandler(_log_file, encoding="utf-8")
@@ -106,8 +104,7 @@ def main():
     trader.add_strategy(strategy)
 
     mode                 = "📄 PAPER TRADING" if is_paper else "💰 LIVE TRADING ⚠️ REAL MONEY"
-    sentiment_url        = os.getenv("SENTIMENT_API_URL",   "http://localhost:8000")
-    sentiment_endpoint   = os.getenv("SENTIMENT_ENDPOINT",  "/analyze")
+    sentiment_base       = os.getenv("SENTIMENT_API_URL", "http://localhost:8000")
     sentiment_configured = bool(os.getenv("SENTIMENT_ADMIN_TOKEN", ""))
     swing_mode           = PARAMS["swing_mode"]
 
@@ -132,9 +129,8 @@ def main():
     print(f"  Ollama Model      : llama3.2:3b (localhost:11434)")
     print(f"  Trade Journal     : cache/trade_journal.db")
     print(f"  Log File          : {_log_file}")
-    print(f"  Sentiment Alpha   : {sentiment_url}{sentiment_endpoint} "
+    print(f"  Sentiment Alpha   : {sentiment_base}/api/v1/analyze "
           f"({'token set ✅' if sentiment_configured else 'no token ⚠️'})")
-    print(f"  (if 404: browse {sentiment_url}/docs → set SENTIMENT_ENDPOINT in .env)")
     print("=" * 70)
     print()
     print("  Daily schedule:")
@@ -148,8 +144,6 @@ def main():
     print("                      → SELL signals acted on immediately")
     print("  • ~4:00 PM ET     — FINAL signals via after_market_closes()")
     print("                      → Official close prices, SELL signals acted on")
-    print("                      (moved from 4:15 PM iteration — LumiBot blocks")
-    print("                       on_trading_iteration after market close)")
     if swing_mode:
         print("  • Overnight        — All positions held (swing mode)")
     else:
