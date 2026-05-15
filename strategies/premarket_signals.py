@@ -8,33 +8,27 @@ Three signal sources that run at startup / before_market_opens():
   3. Sentiment-Trading-Alpha — directional score from Sentiment-Trading-Alpha REST API
 
 Sentiment-Trading-Alpha API (confirmed from source code):
-──────────────────────────────────────────────────────────
   Endpoint:  POST /api/v1/analyze
-  Base URL:  SENTIMENT_API_URL env var (default: http://localhost:8000)
   Auth:      X-Admin-Token header (SENTIMENT_ADMIN_TOKEN env var)
 
-  Request body (AnalysisRequest schema):
-    {
-      "symbols":          ["SPY", "QQQ", ...],
-      "max_posts":        20,     ← kept low for pre-market speed
-      "include_backtest": false,  ← skip backtest, saves 30-60s
-      "lookback_days":    14
-    }
+  Request body:
+    symbols:          list of tickers
+    max_posts:        20  (low for speed)
+    include_backtest: false
+    lookback_days:    14
 
-  Response fields used:
-    trading_signal.signal_type       "LONG" | "SHORT" | "HOLD"
-    trading_signal.confidence_score  0.0–1.0
-    trading_signal.conviction_level  "HIGH" | "MEDIUM" | "LOW"
-    trading_signal.recommendations   per-symbol action list
-    sentiment_scores.<SYMBOL>.directional_score  -1.0 to +1.0
+v3 fix — focused symbol list:
+  trigger_sentiment_async() now accepts an optional bias dict.
+  When provided it sends ONLY BUY/STRONG_BUY symbols + SPY + QQQ
+  instead of all 40 symbols.
 
-v2 fixes:
-  - Correct endpoint: /api/v1/analyze (was /analyze — 404 fixed)
-  - Removed risk_profile from payload (not in AnalysisRequest schema)
-  - Timeout raised to 300s (was 120s) — cold-start pipeline takes 2-4 min
-  - max_posts reduced to 20 (was 50) — faster signal, sufficient for direction
-  - include_backtest=false — saves 30-60s per call
-  - Explicit 404/401/403 error messages with actionable guidance
+  Why: STA generates LLM keywords for each new/custom symbol on first
+  call (~50s each). 40 symbols = ~33 min, blows the 300s timeout.
+  3-8 BUY symbols = ~3-8 min, fits comfortably.
+
+  After the first call for a symbol, STA caches the keywords in its
+  SQLite DB — subsequent calls are near-instant. The cache builds
+  itself naturally as symbols rotate through BUY signals over time.
 """
 
 from __future__ import annotations
@@ -53,13 +47,15 @@ ALPACA_NEWS_BASE = "https://data.alpaca.markets/v1beta1"
 SENTIMENT_BASE  = os.getenv("SENTIMENT_API_URL",    "http://localhost:8000")
 SENTIMENT_TOKEN = os.getenv("SENTIMENT_ADMIN_TOKEN", "")
 
-# Confirmed endpoint path from Sentiment-Trading-Alpha source:
-#   backend/main.py:          app.include_router(analysis_router, prefix="/api/v1")
+# Confirmed from Sentiment-Trading-Alpha source:
+#   backend/main.py:             app.include_router(analysis_router, prefix="/api/v1")
 #   backend/routers/analysis.py: router.post("/analyze")
-#   Combined:                 POST /api/v1/analyze
 SENTIMENT_ANALYZE_URL = f"{SENTIMENT_BASE}/api/v1/analyze"
 
-# Cache TTL in minutes — re-fetch if older than this
+# Core indices always included in STA calls for portfolio-level signal
+SENTIMENT_CORE_SYMBOLS = ["SPY", "QQQ"]
+
+# Cache TTL — re-fetch if older than this
 SENTIMENT_MAX_AGE_MINUTES = 90
 
 _sentiment_cache:      dict               = {}
@@ -70,10 +66,7 @@ _sentiment_lock = threading.Lock()
 # ── 1. Pre-market gap analysis ─────────────────────────────────────────────────
 
 def get_premarket_gaps(symbols: list[str], api_key: str, api_secret: str) -> dict:
-    """
-    Fetch pre-market price vs prior close for each symbol via Alpaca Data API.
-    Returns per-symbol dict with gap_pct, gap_signal, gap_vol_ratio.
-    """
+    """Fetch pre-market price vs prior close for each symbol via Alpaca Data API."""
     results = {}
     headers = {
         "APCA-API-KEY-ID":     api_key,
@@ -101,8 +94,7 @@ def get_premarket_gaps(symbols: list[str], api_key: str, api_secret: str) -> dic
             )
             quote     = quote_resp.json().get("quote", {})
             pre_price = float(quote.get("ap", 0) or quote.get("bp", 0) or prior_close)
-
-            gap_pct = ((pre_price - prior_close) / prior_close * 100) if prior_close else 0.0
+            gap_pct   = ((pre_price - prior_close) / prior_close * 100) if prior_close else 0.0
 
             if gap_pct >= 0.5:
                 gap_signal = "GAP_UP"
@@ -186,12 +178,9 @@ def _fetch_sentiment_signal(symbols: list[str]) -> Optional[dict]:
     """
     Call POST /api/v1/analyze on the Sentiment-Trading-Alpha backend.
 
-    Timeout is 300s (5 min) to handle cold-start runs where the backend
-    needs to ingest RSS articles and run the full LLM pipeline for the
-    first time. Subsequent calls are faster (ingestion cache is warm).
-
-    max_posts=20 keeps the pipeline fast — sufficient for directional signal.
-    include_backtest=False saves 30-60s we don't need.
+    Timeout: 300s — handles cold-start keyword generation (~50s/symbol).
+    max_posts: 20 — enough for direction, faster than 50.
+    include_backtest: False — saves 30-60s per call.
     """
     if not SENTIMENT_BASE:
         return None
@@ -202,8 +191,8 @@ def _fetch_sentiment_signal(symbols: list[str]) -> Optional[dict]:
 
     payload = {
         "symbols":          [s.upper() for s in symbols],
-        "max_posts":        20,      # low for speed — we just need direction
-        "include_backtest": False,   # skip backtest, saves 30-60s
+        "max_posts":        20,
+        "include_backtest": False,
         "lookback_days":    14,
     }
 
@@ -212,14 +201,13 @@ def _fetch_sentiment_signal(symbols: list[str]) -> Optional[dict]:
             SENTIMENT_ANALYZE_URL,
             json=payload,
             headers=headers,
-            timeout=300,   # 5 min — handles cold-start LLM pipeline
+            timeout=300,
         )
 
         if resp.status_code == 404:
             print(
                 f"[premarket] Sentiment-Trading-Alpha 404 at {SENTIMENT_ANALYZE_URL}\n"
-                f"           Verify backend is running: python run.py (in STA directory)\n"
-                f"           Expected: POST http://localhost:8000/api/v1/analyze"
+                f"           Verify backend is running: python run.py (in STA directory)"
             )
             return None
 
@@ -234,7 +222,6 @@ def _fetch_sentiment_signal(symbols: list[str]) -> Optional[dict]:
         return resp.json()
 
     except requests.exceptions.ConnectionError:
-        # Backend not running — fail silently
         return None
     except requests.exceptions.Timeout:
         print("[premarket] Sentiment-Trading-Alpha timed out after 300s — skipping")
@@ -248,12 +235,6 @@ def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dic
     """
     Get per-symbol sentiment from Sentiment-Trading-Alpha.
     Results cached for SENTIMENT_MAX_AGE_MINUTES.
-
-    Returns per-symbol dict:
-      sentiment_signal:      "LONG" | "SHORT" | "HOLD"
-      sentiment_confidence:  0.0–1.0
-      sentiment_conviction:  "HIGH" | "MEDIUM" | "LOW"
-      sentiment_directional: -1.0 to +1.0
     """
     global _sentiment_cache, _sentiment_cache_time
 
@@ -274,7 +255,6 @@ def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dic
             print("[premarket] Sentiment-Trading-Alpha: unavailable — continuing without it")
             return {}
 
-        # ── Parse AnalysisResponse ──────────────────────────────────────────
         trading_signal   = raw.get("trading_signal") or {}
         sentiment_scores = raw.get("sentiment_scores") or {}
 
@@ -282,7 +262,6 @@ def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dic
         confidence  = float(trading_signal.get("confidence_score", 0.0) or 0.0)
         conviction  = str(trading_signal.get("conviction_level", "LOW") or "LOW").upper()
 
-        # Per-symbol recommendations: underlying_symbol → {action, thesis}
         recommendations = trading_signal.get("recommendations") or []
         rec_map = {
             str(r.get("underlying_symbol") or r.get("symbol") or "").upper(): r
@@ -294,10 +273,8 @@ def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dic
             sym_upper  = symbol.upper()
             rec        = rec_map.get(sym_upper, {})
             sent_entry = sentiment_scores.get(sym_upper) or {}
-
             directional = float(sent_entry.get("directional_score", 0.0) or 0.0)
 
-            # Per-symbol signal: prefer recommendation thesis, fall back to portfolio
             thesis = str(rec.get("thesis") or "").upper()
             action = str(rec.get("action") or "").upper()
 
@@ -328,23 +305,77 @@ def get_sentiment_signal(symbols: list[str], force_refresh: bool = False) -> dic
         return results
 
 
-def trigger_sentiment_async(symbols: list[str]):
+def trigger_sentiment_async(symbols: list[str], bias: dict = None):
     """
     Fire Sentiment-Trading-Alpha in a background thread at startup.
-    Result cached by 9:45 AM ORB window — bot continues without blocking.
+
+    KEY FIX (v3): When bias is provided, only sends BUY/STRONG_BUY symbols
+    plus the core indices (SPY, QQQ) instead of all symbols.
+
+    Why this matters:
+      - STA generates LLM keywords for each unknown symbol (~50s each)
+      - 40 symbols × 50s = ~33 min → blows the 300s timeout every time
+      - 3-8 BUY symbols × 50s = ~3-8 min → fits within 300s easily
+      - Once a symbol's keywords are cached in STA's SQLite DB,
+        subsequent calls are near-instant regardless of symbol count
+      - Cache builds naturally as symbols rotate through BUY signals
+
+    The result is cached by 9:45 AM ORB window — bot continues without
+    blocking even if STA takes the full 300s.
     """
+    focused = _build_focused_symbol_list(symbols, bias)
+
     def _run():
         try:
-            get_sentiment_signal(symbols, force_refresh=True)
+            get_sentiment_signal(focused, force_refresh=True)
         except Exception:
             pass
 
     t = threading.Thread(target=_run, daemon=True, name="sentiment-alpha-bg")
     t.start()
     print(
-        "[premarket] Sentiment-Trading-Alpha pipeline started in background "
-        "(bot continues if unavailable)"
+        f"[premarket] Sentiment-Trading-Alpha pipeline started for "
+        f"{len(focused)} symbols: {focused}\n"
+        f"           (bot continues if unavailable)"
     )
+
+
+def _build_focused_symbol_list(symbols: list[str], bias: dict = None) -> list[str]:
+    """
+    Build the focused symbol list for STA.
+
+    Priority:
+      1. BUY/STRONG_BUY symbols from bias (the ones we might actually trade)
+      2. Core indices (SPY, QQQ) for portfolio-level direction
+      3. If no bias or no BUY signals yet, fall back to core + first 4 symbols
+
+    Max symbols sent: ~10 (8 BUY max + 2 core) to keep pipeline fast.
+    """
+    if not bias:
+        # No bias yet (startup before signals run) — just send core indices
+        fallback = list(SENTIMENT_CORE_SYMBOLS)
+        for s in symbols[:4]:
+            if s not in fallback:
+                fallback.append(s)
+        return fallback
+
+    # Collect BUY/STRONG_BUY symbols
+    buy_symbols = [
+        s for s in symbols
+        if bias.get(s, {}).get("action", "HOLD") in ("BUY", "STRONG_BUY")
+    ]
+
+    # Always include core indices
+    focused = list(SENTIMENT_CORE_SYMBOLS)
+    for s in buy_symbols:
+        if s not in focused:
+            focused.append(s)
+
+    if len(focused) <= len(SENTIMENT_CORE_SYMBOLS):
+        # No BUY signals today — just core indices, fast call
+        pass
+
+    return focused
 
 
 # ── 4. Merged enrichment ───────────────────────────────────────────────────────
@@ -380,8 +411,10 @@ def enrich_bias(
 
     sentiment = {}
     if run_sentiment:
+        # During enrich_bias (before_market_opens), use focused list too
+        focused = _build_focused_symbol_list(symbols, bias)
         try:
-            sentiment = get_sentiment_signal(symbols)
+            sentiment = get_sentiment_signal(focused)
         except Exception:
             sentiment = {}
         if sentiment:
@@ -389,7 +422,8 @@ def enrich_bias(
             shorts = [s for s, j in sentiment.items() if j.get("sentiment_signal") == "SHORT"]
             print(
                 f"[premarket] Sentiment: {len(longs)} LONG, {len(shorts)} SHORT, "
-                f"{len(symbols)-len(longs)-len(shorts)} HOLD"
+                f"{len(focused)-len(longs)-len(shorts)} HOLD "
+                f"(from {len(focused)} focused symbols)"
             )
         else:
             print("[premarket] Sentiment-Trading-Alpha: unavailable — continuing without it")

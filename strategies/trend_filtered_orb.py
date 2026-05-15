@@ -152,6 +152,15 @@ All fixes combined:
       on_trading_iteration() after ~4:03 PM so the 4:15 PM block never fired
     - Earnings filter: "No earnings dates found" logged at DEBUG not ERROR
       (ETFs don't have earnings — this was noisy, not an error)
+
+TrendFilteredORB Strategy — v8
+────────────────────────────────
+All fixes:
+
+  v7: breakout filter, sizing guards, direction bug, reduced regime prompt
+  v8: after_market_closes() for FINAL signals, earnings filter log level fix
+  v8.1: trigger_sentiment_async() now receives bias dict so STA only
+        processes BUY/STRONG_BUY symbols + SPY/QQQ instead of all 40
 """
 
 import os
@@ -289,9 +298,13 @@ class TrendFilteredORB(Strategy):
 
         print(f"[startup] Ready | bias: {len(self._daily_bias)} symbols\n")
 
+        # Pass bias so STA only processes BUY symbols (not all 40)
         if _PREMARKET_AVAILABLE:
             try:
-                trigger_sentiment_async(self._load_symbols())
+                trigger_sentiment_async(
+                    self._load_symbols(),
+                    bias=self._daily_bias,
+                )
             except Exception as e:
                 print(f"[startup] Sentiment trigger failed: {e}")
 
@@ -334,24 +347,19 @@ class TrendFilteredORB(Strategy):
 
     def after_market_closes(self):
         """
-        LumiBot calls this once after market close (~4:00–4:05 PM ET).
-
-        FINAL EOD signals live here (v8 fix). Previously they were in
-        on_trading_iteration() at 4:15 PM, but LumiBot stops calling that
-        method after ~4:03 PM ("market is not currently open"), so the
-        FINAL run never fired. after_market_closes() is called regardless
-        of market hours, fixing the issue.
+        LumiBot calls this once after market close (~4:00 PM ET).
+        FINAL EOD signals live here — LumiBot blocks on_trading_iteration()
+        after ~4:03 PM so the old 4:15 PM in-iteration block never fired.
         """
         if self._final_signals_done:
             return
-
         self.log_message("After-close — running FINAL EOD signals (official close prices)")
         try:
             self._run_eod_signals(label="FINAL")
             self._final_signals_done = True
             self._check_and_close_sell_signals(reason="FINAL_SELL_SIGNAL")
         except Exception as e:
-            self.log_message(f"FINAL signals error in after_market_closes: {e}")
+            self.log_message(f"FINAL signals error: {e}")
 
     # ── Main iteration ────────────────────────────────────────────────────
 
@@ -380,8 +388,6 @@ class TrendFilteredORB(Strategy):
         if now.time() >= dtime(eod_h, eod_m):
             self._close_leveraged_positions("EOD")
 
-        # 3:50 PM PRELIM — fires while market is still open
-        # FINAL moved to after_market_closes() — LumiBot blocks iterations after 4:03 PM
         if (now.time() >= dtime(SIGNAL_PRELIM_HOUR, SIGNAL_PRELIM_MINUTE)
                 and not self._prelim_signals_done):
             self.log_message("3:50 PM — running preliminary EOD signals")
@@ -402,7 +408,6 @@ class TrendFilteredORB(Strategy):
 
         self._monitor_open_positions()
 
-        # ── ORB entries 9:45 AM – noon ─────────────────────────────────
         if dtime(9, 45) <= now.time() <= dtime(12, 0):
             max_pos    = self.parameters["max_positions"]
             slots_free = max_pos - len(self._positions)
@@ -470,15 +475,10 @@ class TrendFilteredORB(Strategy):
                     pass
 
                 self._positions[ticker] = {
-                    "symbol":       ticker,
-                    "direction":    "LONG",
-                    "entry_price":  avg_price,
-                    "stop":         stop,
-                    "target":       target,
-                    "qty":          qty,
-                    "entry_value":  self.portfolio_value,
-                    "overnight_ok": overnight,
-                    "synced":       True,
+                    "symbol": ticker, "direction": "LONG",
+                    "entry_price": avg_price, "stop": stop, "target": target,
+                    "qty": qty, "entry_value": self.portfolio_value,
+                    "overnight_ok": overnight, "synced": True,
                 }
                 synced.append(ticker)
                 if is_leveraged(ticker):
@@ -520,7 +520,6 @@ class TrendFilteredORB(Strategy):
                     + min(vol_ratio - 1.0, 1.0) * 10
                     + action_bonus
                 )
-
                 within_cooldown = days_since < cooldown_days
                 is_force_sell   = (
                     conviction     >= force_conv_gate
@@ -548,7 +547,6 @@ class TrendFilteredORB(Strategy):
                         f"[SWING] 📅 Routine sell {symbol} — {days_since}d >= "
                         f"{cooldown_days}d | conviction={conviction:.0f} {action}"
                     )
-
                 self._last_swing_sell[symbol] = ddate.today()
             else:
                 self.log_message(
@@ -647,7 +645,6 @@ class TrendFilteredORB(Strategy):
             if overnight:
                 self.log_message(f"EOD: keeping overnight: {overnight}")
             return
-
         for exec_ticker, pos in list(to_close.items()):
             try:
                 bars = self.get_historical_prices(exec_ticker, 2, "5m")
@@ -657,7 +654,6 @@ class TrendFilteredORB(Strategy):
             except Exception:
                 exit_price = pos["entry_price"]
             self._close_single_position(exec_ticker, pos, reason, exit_price)
-
         overnight = list(self._positions.keys())
         if overnight:
             self.log_message(f"EOD done | holding overnight: {overnight}")
@@ -825,14 +821,8 @@ class TrendFilteredORB(Strategy):
     # ── Regime Refresh ────────────────────────────────────────────────────
 
     def _refresh_regime(self, symbol: str):
-        """
-        Fetch bars and call detect_regime().
-        Fetches 10/10/5 bars (5m/15m/1H); fmt_bars uses [-5:] so
-        only 15 OHLCV rows appear in the prompt — keeps generation fast.
-        """
         try:
             bars_5m = self.get_historical_prices(symbol, 10, "5m")
-
             if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
                 bars_15m = bars_1h = None
             else:
@@ -872,15 +862,6 @@ class TrendFilteredORB(Strategy):
     # ── Per-Symbol ORB Entry ──────────────────────────────────────────────
 
     def _process_symbol(self, symbol: str, now, today):
-        """
-        Evaluate whether to enter a position for this symbol.
-
-        Entry rules (v7/v8):
-          BUY bias   → enter LONG only if price has confirmed breakout above OR High
-          HOLD bias  → same breakout requirement, at 0.5× size
-          SELL bias  → LONG blocked; SHORT only if breakdown AND leveraged inverse exists
-          Inside OR  → skip regardless of bias (WAIT state)
-        """
         bias   = self._daily_bias.get(symbol, {"action": "HOLD"})
         action = bias.get("action", "HOLD")
 
@@ -896,7 +877,6 @@ class TrendFilteredORB(Strategy):
         if not want_long and not hold_bias and not want_short:
             return None
 
-        # Earnings filter
         try:
             from strategies.earnings_filter import is_earnings_safe, get_earnings_info
             if not is_earnings_safe(symbol):
@@ -964,12 +944,10 @@ class TrendFilteredORB(Strategy):
             self.log_message(f"SKIP {symbol} — poor regime for ORB")
             return None
 
-        # ── Confirmed breakout check ───────────────────────────────────────
         min_bp         = self.parameters.get("min_breakout_pct", 0.001)
         is_long_break  = current > state["or_high"] * (1 + min_bp)
         is_short_break = current < state["or_low"]  * (1 - min_bp)
 
-        # direction and exec_ticker only assigned after breakout confirmed
         direction   = None
         exec_ticker = None
 
@@ -1000,7 +978,6 @@ class TrendFilteredORB(Strategy):
         if direction == "SHORT" and pair["bull"] in self._positions: return None
         if exec_ticker in self._positions: return None
 
-        # ── AI grading ─────────────────────────────────────────────────────
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
             grading = {"approve": True, "confidence": 0.7, "size_multiplier": 1.0}
         else:
@@ -1022,23 +999,18 @@ class TrendFilteredORB(Strategy):
             )
             return None
 
-        # ── Swing mode entry guard ─────────────────────────────────────────
         swing_mode = self.parameters.get("swing_mode", False)
         if swing_mode:
             from strategies.leverage_map import get_swing_ticker, is_leveraged_or_inverse
-
             if direction == "SHORT":
                 self.log_message(f"[SWING] Skip SHORT {symbol} — inverse ETFs disabled")
                 return None
-
             swing_ticker = get_swing_ticker(symbol)
             if is_leveraged_or_inverse(swing_ticker):
                 self.log_message(f"[SWING] ⚠️ Safety block — {swing_ticker} is leveraged")
                 return None
-
             direction   = "LONG"
             exec_ticker = swing_ticker
-
             swing_min_conv     = self.parameters.get("swing_min_conviction", 75)
             preview_conviction = (
                 grading.get("confidence", 0.60) * 40
@@ -1052,7 +1024,6 @@ class TrendFilteredORB(Strategy):
                 )
                 return None
 
-        # ── Dynamic sizing ─────────────────────────────────────────────────
         base_risk    = self.parameters["risk_pct"]
         size_mult    = grading.get("size_multiplier", 1.0)
         if hold_bias:
@@ -1082,7 +1053,6 @@ class TrendFilteredORB(Strategy):
         if qty < 1:
             return None
 
-        # ── Conviction score ───────────────────────────────────────────────
         bull_score   = bias.get("bull_score", 0) if direction == "LONG" else bias.get("bear_score", 0)
         vol_ratio    = bias.get("vol_ratio", 1.0)
         action_bonus = 1 if action in ("STRONG_BUY", "STRONG_SELL") else 0
