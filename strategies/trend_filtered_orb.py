@@ -161,6 +161,61 @@ All fixes:
   v8: after_market_closes() for FINAL signals, earnings filter log level fix
   v8.1: trigger_sentiment_async() now receives bias dict so STA only
         processes BUY/STRONG_BUY symbols + SPY/QQQ instead of all 40
+
+TrendFilteredORB Strategy — v9
+────────────────────────────────
+CRITICAL FIX in v9: Order direction and trade model completely corrected.
+
+THE CORRECT TRADE MODEL (never short-sell):
+  ─────────────────────────────────────────
+  We ONLY ever submit BUY orders. We never short-sell.
+
+  BUY/STRONG_BUY signal on symbol:
+    → BUY the bull leveraged ETF (e.g. QQQ BUY → buy TQQQ)
+    → If no leveraged ETF, BUY the symbol directly
+    → Stop below entry, target above entry
+
+  SELL/STRONG_SELL signal on symbol:
+    → BUY the bear/inverse leveraged ETF (e.g. IBIT SELL → buy BITI)
+    → If bull==bear (direct-trade, no inverse), SKIP — do NOT trade
+    → Stop below entry (of the inverse ETF), target above entry
+    → We own the inverse ETF as a LONG position
+
+  HOLD signal on symbol:
+    → ONLY enter if price breaks out ABOVE OR High (bullish breakout)
+    → BUY the bull leveraged ETF or the symbol directly
+    → NEVER enter bearish on a HOLD signal
+    → Skip if price is inside range or breaking down
+
+  Stop/target:
+    → Always: stop = entry - risk_dist, target = entry + risk_dist × reward
+    → Same formula for both bull and bear ETF entries
+    → We always WANT the price to go UP after we buy
+
+  Closing:
+    → Stop hit: price falls below stop → SELL to close
+    → Target hit: price rises above target → SELL to close
+    → EOD: leveraged positions closed at 3:45 PM
+    → SELL signal: if we hold a bull ETF and the underlying gets a SELL
+      signal → close. If we hold an inverse ETF and the underlying gets
+      a BUY signal → close.
+
+BUGS FIXED in v9 vs v8:
+  1. HOLD bias was opening SHORT trades via is_short_break path → removed
+  2. direction="SHORT" submitted "sell" orders → ALL orders now submit "buy"
+  3. Stop/target were inverted for inverse ETF trades → fixed, always same formula
+  4. Direct-trade symbols (no inverse) were being short-sold → blocked
+  5. Candidates were ranked before direction was confirmed → ranking now only
+     includes valid confirmed setups
+  6. Immediate TARGET/STOP hits after bad orders → fixed by correct price math
+
+All v7/v8 fixes retained:
+  - Breakout filter (min_breakout_pct)
+  - Sizing guards (min_stop_pct, max_position_pct)
+  - direction/exec_ticker assigned after breakout confirmed
+  - Regime prompt reduced (10/10/5 bars)
+  - after_market_closes() for FINAL signals
+  - Earnings filter at DEBUG level
 """
 
 import os
@@ -205,7 +260,7 @@ MARKET_CLOSE_TIME = dtime(16, 25)
 
 LEVERAGED_TICKERS = {
     "TQQQ","SQQQ","SPXL","SPXS","SOXL","SOXS","NVDL","NVDD",
-    "UGL","GLL","AGQ","ZSL","JNUG","JDST","BITX","FAS","FAZ",
+    "UGL","GLL","AGQ","ZSL","JNUG","JDST","BITX","BITI","FAS","FAZ",
     "ERX","ERY","TSMU","PTIR","BITU","UCO","SCO","UPRO","SPXU",
 }
 
@@ -298,7 +353,6 @@ class TrendFilteredORB(Strategy):
 
         print(f"[startup] Ready | bias: {len(self._daily_bias)} symbols\n")
 
-        # Pass bias so STA only processes BUY symbols (not all 40)
         if _PREMARKET_AVAILABLE:
             try:
                 trigger_sentiment_async(
@@ -346,11 +400,7 @@ class TrendFilteredORB(Strategy):
                 self.log_message(f"Pre-market enrichment failed: {e} — using technical bias only")
 
     def after_market_closes(self):
-        """
-        LumiBot calls this once after market close (~4:00 PM ET).
-        FINAL EOD signals live here — LumiBot blocks on_trading_iteration()
-        after ~4:03 PM so the old 4:15 PM in-iteration block never fired.
-        """
+        """FINAL EOD signals — LumiBot blocks on_trading_iteration after ~4:03 PM."""
         if self._final_signals_done:
             return
         self.log_message("After-close — running FINAL EOD signals (official close prices)")
@@ -475,10 +525,12 @@ class TrendFilteredORB(Strategy):
                     pass
 
                 self._positions[ticker] = {
-                    "symbol": ticker, "direction": "LONG",
+                    "symbol": ticker, "signal_symbol": ticker,
+                    "direction": "LONG",
                     "entry_price": avg_price, "stop": stop, "target": target,
                     "qty": qty, "entry_value": self.portfolio_value,
                     "overnight_ok": overnight, "synced": True,
+                    "is_inverse": False,
                 }
                 synced.append(ticker)
                 if is_leveraged(ticker):
@@ -491,6 +543,12 @@ class TrendFilteredORB(Strategy):
     # ── Sell Signal Exit ──────────────────────────────────────────────────
 
     def _check_and_close_sell_signals(self, reason: str = "SELL_SIGNAL"):
+        """
+        Close positions when the underlying signal reverses.
+
+        For bull ETF positions: close on SELL/STRONG_SELL signal on the underlying.
+        For inverse ETF positions: close on BUY/STRONG_BUY signal on the underlying.
+        """
         swing_mode      = self.parameters.get("swing_mode", False)
         cooldown_days   = self.parameters.get("swing_sell_cooldown_days", 90)
         force_conv_gate = self.parameters.get("swing_force_sell_conviction", 85)
@@ -500,15 +558,25 @@ class TrendFilteredORB(Strategy):
             if not pos.get("overnight_ok", False):
                 continue
 
-            symbol = pos.get("symbol", exec_ticker)
-            bias   = self._daily_bias.get(symbol, {})
-            action = bias.get("action", "HOLD")
+            signal_symbol = pos.get("signal_symbol", pos.get("symbol", exec_ticker))
+            bias          = self._daily_bias.get(signal_symbol, {})
+            action        = bias.get("action", "HOLD")
+            is_inverse    = pos.get("is_inverse", False)
 
-            if action not in ("SELL", "STRONG_SELL"):
+            # For bull ETF / direct positions: close on SELL signal
+            # For inverse ETF positions: close on BUY signal (market reversed)
+            if is_inverse:
+                should_close = action in ("BUY", "STRONG_BUY")
+                close_reason = f"underlying {signal_symbol} now BUY — closing inverse position"
+            else:
+                should_close = action in ("SELL", "STRONG_SELL")
+                close_reason = f"underlying {signal_symbol} now SELL"
+
+            if not should_close:
                 continue
 
-            if swing_mode:
-                last_sell  = self._last_swing_sell.get(symbol)
+            if swing_mode and not is_inverse:
+                last_sell  = self._last_swing_sell.get(signal_symbol)
                 days_since = (ddate.today() - last_sell).days if last_sell else 999
 
                 bear_score   = bias.get("bear_score", 0)
@@ -529,7 +597,7 @@ class TrendFilteredORB(Strategy):
 
                 if within_cooldown and not is_force_sell:
                     self.log_message(
-                        f"[SWING] 🔒 Holding {symbol} — {days_since}d since last sell "
+                        f"[SWING] 🔒 Holding {signal_symbol} — {days_since}d since last sell "
                         f"(cooldown={cooldown_days}d) | conviction={conviction:.0f} "
                         f"bear={bear_score} {action} — not strong enough to override"
                     )
@@ -537,21 +605,19 @@ class TrendFilteredORB(Strategy):
 
                 if within_cooldown and is_force_sell:
                     self.log_message(
-                        f"[SWING] ⚡ FORCE-SELL {symbol} — "
+                        f"[SWING] ⚡ FORCE-SELL {signal_symbol} — "
                         f"conviction={conviction:.0f}>={force_conv_gate}, "
-                        f"bear_score={bear_score}>={force_bear_gate}, STRONG_SELL | "
-                        f"only {days_since}d since last sell — overriding cooldown"
+                        f"bear_score={bear_score}>={force_bear_gate}, STRONG_SELL"
                     )
                 else:
                     self.log_message(
-                        f"[SWING] 📅 Routine sell {symbol} — {days_since}d >= "
+                        f"[SWING] 📅 Routine sell {signal_symbol} — {days_since}d >= "
                         f"{cooldown_days}d | conviction={conviction:.0f} {action}"
                     )
-                self._last_swing_sell[symbol] = ddate.today()
+                self._last_swing_sell[signal_symbol] = ddate.today()
             else:
                 self.log_message(
-                    f"SELL signal [{reason}] | closing {exec_ticker} "
-                    f"(signal symbol: {symbol} → {action})"
+                    f"Signal exit [{reason}] | closing {exec_ticker} — {close_reason}"
                 )
 
             try:
@@ -567,23 +633,24 @@ class TrendFilteredORB(Strategy):
     # ── Stop/Target Monitor ───────────────────────────────────────────────
 
     def _monitor_open_positions(self):
+        """
+        Monitor stop/target for all open positions.
+        All positions are LONG (we buy and hold, never short-sell).
+        Stop: price falls below stop → sell to close (loss).
+        Target: price rises above target → sell to close (profit).
+        """
         for exec_ticker, pos in list(self._positions.items()):
             try:
                 bars = self.get_historical_prices(exec_ticker, 2, "5m")
                 if bars is None or len(bars.df) == 0:
                     continue
-                current   = float(bars.df["close"].iloc[-1])
-                direction = pos["direction"]
-                stop      = pos["stop"]
-                target    = pos["target"]
+                current = float(bars.df["close"].iloc[-1])
+                stop    = pos["stop"]
+                target  = pos["target"]
 
                 hit = None
-                if direction == "LONG":
-                    if current <= stop:     hit = "STOP"
-                    elif current >= target: hit = "TARGET"
-                elif direction == "SHORT":
-                    if current >= stop:     hit = "STOP"
-                    elif current <= target: hit = "TARGET"
+                if current <= stop:    hit = "STOP"
+                elif current >= target: hit = "TARGET"
 
                 if hit:
                     self._close_single_position(exec_ticker, pos, hit, current)
@@ -619,9 +686,10 @@ class TrendFilteredORB(Strategy):
             except Exception:
                 pass
 
-        o_tag = "overnight" if pos.get("overnight_ok") else "intraday"
-        msg   = (
-            f"CLOSED {exec_ticker} ({reason}) @ {exit_price:.2f} | "
+        o_tag      = "overnight" if pos.get("overnight_ok") else "intraday"
+        inv_tag    = " [inverse]" if pos.get("is_inverse") else ""
+        msg        = (
+            f"CLOSED {exec_ticker}{inv_tag} ({reason}) @ {exit_price:.2f} | "
             f"PnL: ${pnl:+.2f} | {o_tag}"
         )
         self.log_message(msg)
@@ -629,9 +697,9 @@ class TrendFilteredORB(Strategy):
 
         self._positions.pop(exec_ticker, None)
         self._trade_ids.pop(exec_ticker, None)
-        symbol = pos.get("symbol")
-        if symbol and symbol in self._orb_state:
-            self._orb_state[symbol]["trade_taken"] = False
+        signal_symbol = pos.get("signal_symbol", pos.get("symbol"))
+        if signal_symbol and signal_symbol in self._orb_state:
+            self._orb_state[signal_symbol]["trade_taken"] = False
 
     # ── EOD: Close Leveraged Only ─────────────────────────────────────────
 
@@ -862,28 +930,55 @@ class TrendFilteredORB(Strategy):
     # ── Per-Symbol ORB Entry ──────────────────────────────────────────────
 
     def _process_symbol(self, symbol: str, now, today):
+        """
+        Evaluate whether to enter a position for this symbol.
+
+        TRADE MODEL (v9 — always BUY, never short-sell):
+        ─────────────────────────────────────────────────
+        BUY/STRONG_BUY + price breaks above OR High:
+          → BUY pair["bull"] (bull leveraged ETF or symbol direct)
+          → is_inverse = False
+
+        SELL/STRONG_SELL + pair has a real inverse ETF (bull != bear):
+          + price breaks below OR Low:
+          → BUY pair["bear"] (inverse/bear leveraged ETF)
+          → is_inverse = True
+          → Stop below entry, target above (we want inverse ETF to go UP)
+
+        SELL/STRONG_SELL + is_direct_trade (no inverse ETF):
+          → SKIP — cannot express bearish view, do not trade
+
+        HOLD:
+          → ONLY enter on upside breakout above OR High
+          → BUY pair["bull"] at 0.5× size
+          → NEVER enter bearish on HOLD signal
+
+        All entries are BUY orders. The order side is always "buy".
+        """
         bias   = self._daily_bias.get(symbol, {"action": "HOLD"})
         action = bias.get("action", "HOLD")
 
         hold_bias  = (action == "HOLD")
-        want_long  = action in ("BUY", "STRONG_BUY")
-        want_short = action in ("SELL", "STRONG_SELL")
+        want_bull  = action in ("BUY", "STRONG_BUY")
+        want_bear  = action in ("SELL", "STRONG_SELL")
 
         pair   = get_leveraged_pair(symbol)
-        direct = is_direct_trade(symbol)
+        direct = is_direct_trade(symbol)   # True if bull == bear (no inverse available)
 
-        if want_short and direct:
-            return None
-        if not want_long and not hold_bias and not want_short:
+        # SELL signal on a direct-trade symbol (no inverse ETF) → skip
+        if want_bear and direct:
             return None
 
+        # Skip WAIT/unknown signals
+        if not want_bull and not hold_bias and not want_bear:
+            return None
+
+        # Earnings filter
         try:
             from strategies.earnings_filter import is_earnings_safe, get_earnings_info
             if not is_earnings_safe(symbol):
                 info = get_earnings_info(symbol)
-                self.log_message(
-                    f"SKIP {symbol} — earnings in {info.get('hours_until','?')}h"
-                )
+                self.log_message(f"SKIP {symbol} — earnings in {info.get('hours_until','?')}h")
                 return None
         except Exception:
             pass
@@ -920,6 +1015,7 @@ class TrendFilteredORB(Strategy):
 
         current = float(df_today["close"].iloc[-1])
 
+        # ── Regime ────────────────────────────────────────────────────────
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
             regime = {"regime": "trending", "confidence": 0.5,
                       "orb_suitability": "moderate",
@@ -944,40 +1040,51 @@ class TrendFilteredORB(Strategy):
             self.log_message(f"SKIP {symbol} — poor regime for ORB")
             return None
 
+        # ── Breakout check ────────────────────────────────────────────────
         min_bp         = self.parameters.get("min_breakout_pct", 0.001)
         is_long_break  = current > state["or_high"] * (1 + min_bp)
         is_short_break = current < state["or_low"]  * (1 - min_bp)
 
-        direction   = None
+        # Resolve exec_ticker and is_inverse AFTER confirming breakout direction
         exec_ticker = None
+        is_inverse  = False
 
-        if want_long:
+        if want_bull:
+            # BUY signal: need upside breakout, buy bull ETF
             if not is_long_break:
                 return None
-            direction   = "LONG"
             exec_ticker = pair["bull"]
-        elif want_short:
+            is_inverse  = False
+
+        elif want_bear:
+            # SELL signal: need downside breakout, buy inverse/bear ETF
+            # pair["bear"] != pair["bull"] already confirmed above (direct guard)
             if not is_short_break:
                 return None
-            direction   = "SHORT"
             exec_ticker = pair["bear"]
-        elif hold_bias:
-            if is_long_break:
-                direction   = "LONG"
-                exec_ticker = pair["bull"]
-            elif is_short_break and not direct:
-                direction   = "SHORT"
-                exec_ticker = pair["bear"]
-            else:
-                return None
+            is_inverse  = True
 
-        if direction is None or exec_ticker is None:
+        elif hold_bias:
+            # HOLD: only enter on upside breakout, bull ETF only, half size
+            # Never enter bearish on a HOLD signal
+            if not is_long_break:
+                return None
+            exec_ticker = pair["bull"]
+            is_inverse  = False
+
+        if exec_ticker is None:
             return None
 
-        if direction == "LONG"  and pair["bear"] in self._positions: return None
-        if direction == "SHORT" and pair["bull"] in self._positions: return None
-        if exec_ticker in self._positions: return None
+        # Block if opposing position already open
+        # (bull ETF open → don't open bear ETF for same underlying, and vice versa)
+        if exec_ticker in self._positions:
+            return None
+        if is_inverse and pair["bull"] in self._positions:
+            return None
+        if not is_inverse and pair["bear"] in self._positions:
+            return None
 
+        # ── AI grading ────────────────────────────────────────────────────
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
             grading = {"approve": True, "confidence": 0.7, "size_multiplier": 1.0}
         else:
@@ -986,7 +1093,9 @@ class TrendFilteredORB(Strategy):
                        for _, r in df_today.iterrows()]
             avg_vol = float(df_today["volume"].mean()) if not df_today.empty else 1.0
             grading = grade_setup(
-                symbol=symbol, direction=direction, candles=candles,
+                symbol=symbol,
+                direction="LONG" if not is_inverse else "SHORT",   # for AI context only
+                candles=candles,
                 or_high=state["or_high"], or_low=state["or_low"],
                 current_price=current, avg_volume=avg_vol,
             )
@@ -999,18 +1108,23 @@ class TrendFilteredORB(Strategy):
             )
             return None
 
+        # ── Swing mode ───────────────────────────────────────────────────
         swing_mode = self.parameters.get("swing_mode", False)
         if swing_mode:
             from strategies.leverage_map import get_swing_ticker, is_leveraged_or_inverse
-            if direction == "SHORT":
-                self.log_message(f"[SWING] Skip SHORT {symbol} — inverse ETFs disabled")
+
+            # Swing mode: no inverse ETFs, only long positions on the underlying
+            if is_inverse:
+                self.log_message(f"[SWING] Skip bearish {symbol} — inverse ETFs disabled in swing mode")
                 return None
+
             swing_ticker = get_swing_ticker(symbol)
             if is_leveraged_or_inverse(swing_ticker):
                 self.log_message(f"[SWING] ⚠️ Safety block — {swing_ticker} is leveraged")
                 return None
-            direction   = "LONG"
+
             exec_ticker = swing_ticker
+
             swing_min_conv     = self.parameters.get("swing_min_conviction", 75)
             preview_conviction = (
                 grading.get("confidence", 0.60) * 40
@@ -1024,6 +1138,7 @@ class TrendFilteredORB(Strategy):
                 )
                 return None
 
+        # ── Sizing ───────────────────────────────────────────────────────
         base_risk    = self.parameters["risk_pct"]
         size_mult    = grading.get("size_multiplier", 1.0)
         if hold_bias:
@@ -1039,12 +1154,11 @@ class TrendFilteredORB(Strategy):
         if risk_dist <= 0:
             return None
 
-        if direction == "LONG":
-            initial_stop   = current - risk_dist
-            initial_target = current + risk_dist * self.parameters["reward_ratio"] * target_adj
-        else:
-            initial_stop   = current + risk_dist
-            initial_target = current - risk_dist * self.parameters["reward_ratio"] * target_adj
+        # Stop is BELOW entry, target is ABOVE entry — always.
+        # We always BUY. We want price to go UP regardless of whether
+        # exec_ticker is a bull ETF or an inverse ETF.
+        initial_stop   = current - risk_dist
+        initial_target = current + risk_dist * self.parameters["reward_ratio"] * target_adj
 
         qty           = int((self.portfolio_value * effective_risk) / risk_dist)
         max_pos_value = self.portfolio_value * self.parameters.get("max_position_pct", 0.15)
@@ -1053,14 +1167,17 @@ class TrendFilteredORB(Strategy):
         if qty < 1:
             return None
 
-        bull_score   = bias.get("bull_score", 0) if direction == "LONG" else bias.get("bear_score", 0)
-        vol_ratio    = bias.get("vol_ratio", 1.0)
-        action_bonus = 1 if action in ("STRONG_BUY", "STRONG_SELL") else 0
-        conviction   = (
+        # ── Conviction score ──────────────────────────────────────────────
+        # Use bull_score for bullish trades, bear_score for bearish (inverse ETF) trades
+        score_key  = "bear_score" if is_inverse else "bull_score"
+        sym_score  = bias.get(score_key, 0)
+        vol_ratio  = bias.get("vol_ratio", 1.0)
+        act_bonus  = 1 if action in ("STRONG_BUY", "STRONG_SELL") else 0
+        conviction = (
             grading["confidence"] * 40
-            + bull_score * 8
+            + sym_score * 8
             + min(vol_ratio - 1.0, 1.0) * 10
-            + action_bonus * 10
+            + act_bonus * 10
         )
 
         if _PREMARKET_AVAILABLE:
@@ -1068,10 +1185,12 @@ class TrendFilteredORB(Strategy):
                 pm_boost         = premarket_conviction_boost(bias)
                 gap_signal       = bias.get("gap_signal", "FLAT")
                 sentiment_signal = bias.get("sentiment_signal", "HOLD")
-                gap_aligned  = (direction == "LONG"  and gap_signal == "GAP_UP") or \
-                               (direction == "SHORT" and gap_signal == "GAP_DOWN")
-                sent_aligned = (direction == "LONG"  and sentiment_signal == "LONG") or \
-                               (direction == "SHORT" and sentiment_signal == "SHORT")
+                # Bull trade: gap up and LONG sentiment are aligned
+                # Bear trade: gap down and SHORT sentiment are aligned
+                gap_aligned  = (not is_inverse and gap_signal == "GAP_UP") or \
+                               (is_inverse     and gap_signal == "GAP_DOWN")
+                sent_aligned = (not is_inverse and sentiment_signal == "LONG") or \
+                               (is_inverse     and sentiment_signal == "SHORT")
                 if gap_aligned or sent_aligned:
                     conviction += pm_boost
                 elif gap_signal != "FLAT" and not gap_aligned:
@@ -1079,22 +1198,39 @@ class TrendFilteredORB(Strategy):
             except Exception:
                 pass
 
+        trade_type = "BEAR[inverse]" if is_inverse else ("HOLD-BIAS" if hold_bias else "BULL")
+
         return {
-            "symbol": symbol, "exec_ticker": exec_ticker,
-            "direction": direction, "current": current, "qty": qty,
-            "initial_stop": initial_stop, "initial_target": initial_target,
-            "effective_risk": effective_risk, "size_mult": size_mult,
-            "hold_bias": hold_bias, "conviction": conviction,
-            "grading": grading, "regime": regime, "regime_type": regime_type,
-            "orb_suitability": orb_suitability, "stop_adj": stop_adj,
-            "target_adj": target_adj, "bias": bias, "action": action,
-            "state": state, "direct": direct, "df_today": df_today,
+            "symbol":          symbol,
+            "exec_ticker":     exec_ticker,
+            "is_inverse":      is_inverse,
+            "trade_type":      trade_type,
+            "current":         current,
+            "qty":             qty,
+            "initial_stop":    initial_stop,
+            "initial_target":  initial_target,
+            "effective_risk":  effective_risk,
+            "size_mult":       size_mult,
+            "hold_bias":       hold_bias,
+            "conviction":      conviction,
+            "grading":         grading,
+            "regime":          regime,
+            "regime_type":     regime_type,
+            "orb_suitability": orb_suitability,
+            "stop_adj":        stop_adj,
+            "target_adj":      target_adj,
+            "bias":            bias,
+            "action":          action,
+            "state":           state,
+            "direct":          direct,
+            "df_today":        df_today,
         }
 
     def _execute_candidate(self, c: dict):
         symbol      = c["symbol"]
         exec_ticker = c["exec_ticker"]
-        direction   = c["direction"]
+        is_inverse  = c["is_inverse"]
+        trade_type  = c["trade_type"]
         current     = c["current"]
         qty         = c["qty"]
         grading     = c["grading"]
@@ -1105,20 +1241,27 @@ class TrendFilteredORB(Strategy):
         state       = c["state"]
         direct      = c["direct"]
 
+        # ── ALWAYS submit a BUY order ─────────────────────────────────────
+        # For bull ETFs: we buy the bull ETF expecting it to go up
+        # For inverse ETFs: we buy the inverse ETF expecting the underlying to go DOWN
+        #                   (inverse ETF goes UP when underlying goes DOWN)
+        # NEVER submit a sell order to open a position.
         try:
-            order = self.create_order(exec_ticker, qty,
-                                      "buy" if direction == "LONG" else "sell",
-                                      time_in_force="day")
+            order = self.create_order(exec_ticker, qty, "buy", time_in_force="day")
             self.submit_order(order)
         except Exception as e:
             self.log_message(f"Order failed {exec_ticker}: {e}")
             return
 
-        overnight_eligible = direct and direction == "LONG"
+        # Overnight eligibility:
+        # Bull direct-trade positions can be held overnight
+        # Inverse ETF positions: close at EOD (leveraged/inverse ETFs decay overnight)
+        overnight_eligible = direct and not is_inverse
 
         trade_id = self._journal.open_trade(
             symbol=symbol, exec_ticker=exec_ticker,
-            direction=direction, entry_price=current, quantity=qty,
+            direction="LONG" if not is_inverse else "LONG_INVERSE",
+            entry_price=current, quantity=qty,
             or_high=state["or_high"], or_low=state["or_low"],
             or_mid=state["or_mid"], initial_stop=c["initial_stop"],
             initial_target=c["initial_target"], risk_pct=c["effective_risk"],
@@ -1142,27 +1285,34 @@ class TrendFilteredORB(Strategy):
         )
 
         self._positions[exec_ticker] = {
-            "symbol": symbol, "direction": direction,
-            "entry_price": current, "stop": c["initial_stop"],
-            "target": c["initial_target"], "qty": qty,
-            "entry_value": self.portfolio_value, "overnight_ok": overnight_eligible,
+            "symbol":         symbol,
+            "signal_symbol":  symbol,
+            "exec_ticker":    exec_ticker,
+            "is_inverse":     is_inverse,
+            "entry_price":    current,
+            "stop":           c["initial_stop"],
+            "target":         c["initial_target"],
+            "qty":            qty,
+            "entry_value":    self.portfolio_value,
+            "overnight_ok":   overnight_eligible,
+            "direction":      "LONG",  # always LONG — we always buy
         }
         self._trade_ids[exec_ticker] = trade_id
         state["trade_taken"] = True
 
-        tag       = "HOLD-BIAS " if hold_bias else ""
         o_tag     = " [OVERNIGHT]" if overnight_eligible else " [EOD]"
         swing_tag = " [SWING]" if self.parameters.get("swing_mode", False) else ""
+        inv_tag   = " → buying inverse ETF" if is_inverse else ""
         msg = (
-            f"{tag}ENTRY {direction}{swing_tag} | {symbol}→{exec_ticker} x{qty} "
+            f"{trade_type}{swing_tag} | {symbol}→{exec_ticker} x{qty} "
             f"@ {current:.2f} | Stop:{c['initial_stop']:.2f} "
             f"Target:{c['initial_target']:.2f} | "
             f"AI:{grading['confidence']:.2f}({c['size_mult']:.1f}x) | "
             f"Conviction:{c['conviction']:.0f} | "
-            f"Regime:{regime.get('regime','?')}{o_tag}"
+            f"Regime:{regime.get('regime','?')}{inv_tag}{o_tag}"
         )
         self.log_message(msg)
-        self._notify(f"Trade-Bot: {tag}ENTRY {direction} {exec_ticker}", msg)
+        self._notify(f"Trade-Bot: BUY {exec_ticker} ({trade_type})", msg)
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
