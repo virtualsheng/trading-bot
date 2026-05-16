@@ -2,7 +2,7 @@
 
 AI-enhanced algorithmic trading bot for US equities. Trades **QQQ only** — buys TQQQ (3× bull) on BUY signals and SQQQ (3× bear) on SELL signals. Runs on a $2,000 Alpaca cash account with one trade per day.
 
-> **Swing trading signals for retirement accounts** are handled by the separate [`swing_signal_engine/`](../swing_signal_engine) project.
+> **Swing trading signals for retirement accounts** are handled by the separate [`swing_signal_engine/`](https://github.com/virtualsheng/swing-signal-engine) project.
 
 ---
 
