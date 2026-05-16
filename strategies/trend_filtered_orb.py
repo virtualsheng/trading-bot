@@ -70,19 +70,13 @@ Changes in v5:
 TrendFilteredORB Strategy — v6
 ────────────────────────────────
 Changes in v6:
-  + Swing mode (SWING_MODE=true in .env or swing_mode param):
-      - No leveraged/inverse ETFs — trades underlying ETF directly
-      - LONG only — no short entries
-      - Entry gated on swing_min_conviction threshold
-      - SELL throttled by swing_sell_cooldown_days (default 90d)
-      - Force-sell override: bypasses cooldown when ALL THREE gates fire:
-          conviction >= swing_force_sell_conviction (default 85)
-          bear_score >= swing_force_sell_bear_score (default 5)
-          action == STRONG_SELL
-      - _last_swing_sell dict tracks last sell date per symbol
+  + Swing mode removed — moved to standalone swing_signal_engine/
+  + Bot now QQQ-only: signal on QQQ, execute on TQQQ (bull) or SQQQ (bear)
+  + SIGNAL_SYMBOL = "QQQ" hardcoded — always trades QQQ → TQQQ/SQQQ
+  + start_bot.bat runs single instance only
 
 Key behaviors from v3/v4/v5 unchanged:
-  - Leveraged/inverse ETFs closed at EOD (irrelevant in swing mode)
+  - TQQQ/SQQQ always closed at EOD (3:45 PM)
   - Direct-trade symbols held overnight, closed on SELL signal
   - Broker position sync at 9:30 AM market open
   - ORB entries once per symbol 9:45 AM – noon
@@ -212,10 +206,8 @@ NEW: Trail-only exit — no hard target close. Unified $2k ORB account support.
     would frequently get knocked out by noise rather than genuine reversal.
     2.0% sits just above the noise floor while still catching real reversals.
 
-  TARGET_EXIT=True still works for swing mode / conservative setups:
-    When target_exit=True the position closes fully at the target price,
-    identical to previous behaviour. Useful for swing positions where you
-    want to lock in a defined gain.
+  TARGET_EXIT=True: position closes fully at target price (conservative mode).
+    Set in PARAMS if you prefer hard target exits over trail + EOD.
 
   New parameters:
     "target_exit":    False   # True = close at target; False = let trail/EOD handle
@@ -471,7 +463,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-SYMBOLS_FILE        = "symbols.txt"
+# Trading bot trades QQQ only → TQQQ (bull) or SQQQ (bear). No symbols.txt needed.
+SIGNAL_SYMBOL = "QQQ"
 BIAS_CACHE          = "cache/daily_bias.json"
 BIAS_CACHE_BACKTEST = "cache/daily_bias_backtest.json"
 
@@ -486,9 +479,7 @@ ORB_ENTRY_START = dtime(9, 45)
 ORB_ENTRY_END   = dtime(12, 0)
 
 LEVERAGED_TICKERS = {
-    "TQQQ","SQQQ","SPXL","SPXS","SOXL","SOXS","NVDL","NVDD",
-    "UGL","GLL","AGQ","ZSL","JNUG","JDST","BITX","BITI","FAS","FAZ",
-    "ERX","ERY","TSMU","PTIR","BITU","UCO","SCO","UPRO","SPXU",
+    "TQQQ", "SQQQ",   # the only leveraged ETFs this bot trades
 }
 
 
@@ -515,11 +506,6 @@ class TrendFilteredORB(Strategy):
         "min_stop_pct":              0.005,
         "max_position_pct":          0.10,  # live: 10% max per position
         "min_breakout_pct":          0.001,
-        "swing_mode":                       False,
-        "swing_min_conviction":             75,
-        "swing_sell_cooldown_days":         90,
-        "swing_force_sell_conviction":      85,
-        "swing_force_sell_bear_score":      5,
         # ── Trailing stop ─────────────────────────────────────────────────
         # trail_stop_pct: trailing stop % below the highest price seen since entry.
         #   The stop ratchets up as price rises but never moves down.
@@ -539,14 +525,10 @@ class TrendFilteredORB(Strategy):
         #     The initial_target is still calculated and logged for reference,
         #     but reaching it does NOT trigger a close. The trade rides as long
         #     as the trail isn't hit, capturing larger moves on strong trend days.
-        #   True (useful for swing mode or very conservative setups): close
-        #     the full position immediately when target is reached.
+        # target_exit=False: trail stop + EOD close handle all exits.
+        # target_exit=True: close at target (conservative setups).
         "target_exit":         False,
-
-        # ── Scale-out (legacy — superceded by trail-only exit) ────────────
-        # target_scale_out is ignored when target_exit=False.
-        # Kept for backward compatibility and swing mode use.
-        "target_scale_out":    1.0,
+        "target_scale_out":    1.0,    # unused when target_exit=False
 
         # ── Stop placement & delay ────────────────────────────────────────
         # stop_mode:
@@ -578,8 +560,6 @@ class TrendFilteredORB(Strategy):
         self._orb_state  = {}
         self._positions  = {}
         self._trade_ids  = {}
-        self._last_swing_sell: dict = {}
-
         self._daily_bias = self._load_bias()
         self._journal    = TradeJournal()
 
@@ -598,11 +578,9 @@ class TrendFilteredORB(Strategy):
             except Exception as e:
                 self.log_message(f"Ollama warmup error: {e}")
 
-        swing_mode = self.parameters.get("swing_mode", False)
         self.log_message(
-            f"Initialized | bias: {len(self._daily_bias)} symbols | "
+            f"Initialized | signal: {SIGNAL_SYMBOL} → TQQQ/SQQQ | "
             f"portfolio: ${self.portfolio_value:,.2f} | "
-            f"swing_mode: {'ON' if swing_mode else 'off'} | "
             f"sleeptime: ORB={self.parameters['sleeptime_orb']} "
             f"default={self.parameters['sleeptime_default']}"
         )
@@ -861,74 +839,27 @@ class TrendFilteredORB(Strategy):
         Bull ETF / direct position: close on SELL/STRONG_SELL signal.
         Inverse ETF position: close on BUY/STRONG_BUY signal (underlying reversed).
         """
-        swing_mode      = self.parameters.get("swing_mode", False)
-        cooldown_days   = self.parameters.get("swing_sell_cooldown_days", 90)
-        force_conv_gate = self.parameters.get("swing_force_sell_conviction", 85)
-        force_bear_gate = self.parameters.get("swing_force_sell_bear_score", 5)
-
         for exec_ticker, pos in list(self._positions.items()):
-            if not pos.get("overnight_ok", False):
-                continue
-
-            signal_symbol = pos.get("signal_symbol", pos.get("symbol", exec_ticker))
+            signal_symbol = pos.get("signal_symbol", exec_ticker)
             bias          = self._daily_bias.get(signal_symbol, {})
-            action        = bias.get("action", "HOLD")
+            bias_signal   = bias.get("signal", "HOLD")
             is_inverse    = pos.get("is_inverse", False)
 
+            # Bull ETF: close on bearish signal
+            # Inverse ETF: close on bullish signal (underlying reversed)
             if is_inverse:
-                should_close = action in ("BUY", "STRONG_BUY")
-                close_reason = f"underlying {signal_symbol} now BUY — closing inverse"
+                should_close  = bias_signal in ("BUY", "STRONG_BUY")
+                close_reason  = f"underlying reversed to {bias_signal}"
             else:
-                should_close = action in ("SELL", "STRONG_SELL")
-                close_reason = f"underlying {signal_symbol} → {action}"
+                should_close  = bias_signal in ("SELL", "STRONG_SELL")
+                close_reason  = f"signal reversed to {bias_signal}"
 
             if not should_close:
                 continue
 
-            if swing_mode and not is_inverse:
-                last_sell  = self._last_swing_sell.get(signal_symbol)
-                days_since = (ddate.today() - last_sell).days if last_sell else 999
-
-                bear_score   = bias.get("bear_score", 0)
-                vol_ratio    = bias.get("vol_ratio", 1.0)
-                action_bonus = 10 if action == "STRONG_SELL" else 0
-                conviction   = (
-                    bias.get("ai_confidence", 0.60) * 40
-                    + bear_score * 8
-                    + min(vol_ratio - 1.0, 1.0) * 10
-                    + action_bonus
-                )
-                within_cooldown = days_since < cooldown_days
-                is_force_sell   = (
-                    conviction     >= force_conv_gate
-                    and bear_score >= force_bear_gate
-                    and action     == "STRONG_SELL"
-                )
-
-                if within_cooldown and not is_force_sell:
-                    self.log_message(
-                        f"[SWING] 🔒 Holding {signal_symbol} — {days_since}d since last sell "
-                        f"(cooldown={cooldown_days}d) | conviction={conviction:.0f} "
-                        f"bear={bear_score} {action} — not strong enough to override"
-                    )
-                    continue
-
-                if within_cooldown and is_force_sell:
-                    self.log_message(
-                        f"[SWING] ⚡ FORCE-SELL {signal_symbol} — "
-                        f"conviction={conviction:.0f}>={force_conv_gate}, "
-                        f"bear_score={bear_score}>={force_bear_gate}, STRONG_SELL"
-                    )
-                else:
-                    self.log_message(
-                        f"[SWING] 📅 Routine sell {signal_symbol} — {days_since}d >= "
-                        f"{cooldown_days}d | conviction={conviction:.0f} {action}"
-                    )
-                self._last_swing_sell[signal_symbol] = ddate.today()
-            else:
-                self.log_message(
-                    f"Signal exit [{reason}] | closing {exec_ticker} — {close_reason}"
-                )
+            self.log_message(
+                f"Signal exit [{reason}] | closing {exec_ticker} — {close_reason}"
+            )
 
             try:
                 bars = self.get_historical_prices(exec_ticker, 2, "5m")
@@ -955,7 +886,7 @@ class TrendFilteredORB(Strategy):
           4. Target is NOT an exit trigger (target_exit=False by default).
              The initial_target is logged for reference but reaching it does
              NOT close the trade. The trail and EOD are the only exits.
-             Set target_exit=True to restore hard target exit (swing mode).
+             Set target_exit=True for hard target exit (conservative).
 
         Why trail-only beats scale-out for ORB:
           On the ~60% of trending days where price continues into the close,
@@ -1427,31 +1358,6 @@ class TrendFilteredORB(Strategy):
             )
             return None
 
-        # ── Swing mode ───────────────────────────────────────────────────
-        swing_mode = self.parameters.get("swing_mode", False)
-        if swing_mode:
-            from strategies.leverage_map import get_swing_ticker, is_leveraged_or_inverse
-            if is_inverse:
-                self.log_message(f"[SWING] Skip bearish {symbol} — inverse ETFs disabled")
-                return None
-            swing_ticker = get_swing_ticker(symbol)
-            if is_leveraged_or_inverse(swing_ticker):
-                self.log_message(f"[SWING] ⚠️ Safety block — {swing_ticker} is leveraged")
-                return None
-            exec_ticker = swing_ticker
-            swing_min_conv     = self.parameters.get("swing_min_conviction", 75)
-            preview_conviction = (
-                grading.get("confidence", 0.60) * 40
-                + bias.get("bull_score", 0) * 8
-                + min(bias.get("vol_ratio", 1.0) - 1.0, 1.0) * 10
-                + (10 if action in ("STRONG_BUY", "STRONG_SELL") else 0)
-            )
-            if preview_conviction < swing_min_conv:
-                self.log_message(
-                    f"[SWING] Skip {symbol} — conviction {preview_conviction:.0f} < {swing_min_conv}"
-                )
-                return None
-
         # ── Sizing ───────────────────────────────────────────────────────
         base_risk    = self.parameters["risk_pct"]
         size_mult    = grading.get("size_multiplier", 1.0)
@@ -1647,10 +1553,9 @@ class TrendFilteredORB(Strategy):
         state["trade_taken"] = True
 
         o_tag     = " [OVERNIGHT]" if overnight_eligible else " [EOD]"
-        swing_tag = " [SWING]" if self.parameters.get("swing_mode", False) else ""
         inv_tag   = " → buying inverse ETF" if is_inverse else ""
         msg = (
-            f"{trade_type}{swing_tag} | {symbol}({signal_price:.2f})→{exec_ticker} x{qty} "
+            f"{trade_type} | {symbol}({signal_price:.2f})→{exec_ticker} x{qty} "
             f"@ {exec_current:.2f} | Stop:{c['initial_stop']:.2f} "
             f"Target:{c['initial_target']:.2f} | "
             f"AI:{grading['confidence']:.2f}({c['size_mult']:.1f}x) | "
@@ -1674,16 +1579,9 @@ class TrendFilteredORB(Strategy):
         except Exception: pass
 
     def _load_symbols(self) -> list:
-        # Allow runner to override the symbols file via module-level variable.
-        # run_live_orb_2k.py sets strategies.trend_filtered_orb.SYMBOLS_FILE
-        # to "symbols_2k.txt" before starting the strategy.
-        path = SYMBOLS_FILE
-        try:
-            with open(path, "r") as f:
-                return [l.strip().upper() for l in f
-                        if l.strip() and not l.startswith("#")]
-        except FileNotFoundError:
-            return ["QQQ"]
+        # Trading bot always trades QQQ only (→ TQQQ bull / SQQQ bear).
+        # No symbols.txt needed.
+        return [SIGNAL_SYMBOL]
 
     def _bias_path(self) -> str:
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":

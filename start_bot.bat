@@ -1,84 +1,48 @@
 @echo off
-title ORB Trading Bot Launcher — Dual Account
+REM ─────────────────────────────────────────────────────────────────────────────
+REM  start_bot.bat — Trend-Filtered ORB Trading Bot
+REM  Single instance: QQQ → TQQQ (bull) / SQQQ (bear)
+REM  $2,000 Alpaca cash account, 1 trade per day
+REM ─────────────────────────────────────────────────────────────────────────────
 
-:: ── Configuration ────────────────────────────────────────────────────────────
-set PROJECT_ROOT=%~dp0
-set PYTHON=python
-set DASHBOARD_PORT=5001
+cd /d "%~dp0"
 
-:: ── Banner ────────────────────────────────────────────────────────────────────
 echo.
-echo  ====================================================
-echo    ORB Trading Bot  ^|  v10  ^|  Dual Account
-echo  ====================================================
+echo  =====================================================
+echo   TREND-FILTERED ORB BOT — QQQ INTRADAY
+echo  =====================================================
+echo   Signal : QQQ
+echo   Bull   : TQQQ  (3x Nasdaq bull)
+echo   Bear   : SQQQ  (3x Nasdaq bear)
+echo   Account: Alpaca cash account (check .env)
+echo  =====================================================
 echo.
 
-:: ── Checks ───────────────────────────────────────────────────────────────────
-%PYTHON% --version >nul 2>&1
+REM Check Python is available
+python --version >nul 2>&1
 if errorlevel 1 (
-    echo  ERROR: Python not found. Make sure Python is in your PATH.
-    pause & exit /b 1
+    echo  ERROR: Python not found. Install Python 3.12.
+    pause
+    exit /b 1
 )
 
-:: ── Activate venv ─────────────────────────────────────────────────────────────
-if exist "%PROJECT_ROOT%venv\Scripts\activate.bat" (
-    call "%PROJECT_ROOT%venv\Scripts\activate.bat"
-) else if exist "%PROJECT_ROOT%.venv\Scripts\activate.bat" (
-    call "%PROJECT_ROOT%.venv\Scripts\activate.bat"
-) else (
-    echo  No venv found — using system Python
+REM Check .env exists
+if not exist ".env" (
+    echo  ERROR: .env not found. Copy .env.example to .env and fill in credentials.
+    pause
+    exit /b 1
 )
 
-cd /d "%PROJECT_ROOT%"
+REM Start Ollama if not already running (suppress output)
+echo  Starting Ollama...
+start /min "" ollama serve >nul 2>&1
+timeout /t 3 /nobreak >nul
 
-:: ── Validate .env keys ────────────────────────────────────────────────────────
-%PYTHON% check_env.py
-if errorlevel 1 (
-    echo.
-    pause & exit /b 1
-)
-
+REM Run the bot
+echo  Starting ORB bot...
 echo.
-echo  Starting 3 processes:
-echo    1. ORB Dashboard                   ^(http://localhost:%DASHBOARD_PORT%^)
-echo    2. ORB account   ^(day trade,  swing_mode=false^)
-echo    3. SWING account ^(overnight,  swing_mode=true^)
-echo.
-echo  Signals: EMA/RSI/MACD + Gap analysis + Alpaca News
-echo  ^(Sentiment-Trading-Alpha removed — see README for details^)
-echo.
-
-:: ── 1. Start dashboard ───────────────────────────────────────────────────────
-start "ORB Dashboard  [port %DASHBOARD_PORT%]" cmd /k "%PYTHON% runners\dashboard_server.py"
-timeout /t 2 /nobreak >nul
-
-:: ── 2. Start ORB account (day trade, swing_mode=false) ───────────────────────
-start "ORB Account  [day trade]" cmd /k "%PYTHON% runners\run_live_combined.py --account orb"
-
-:: ── 3. Start SWING account (overnight, swing_mode=true) ──────────────────────
-:: Delay so ORB warms up Ollama first — both share the same instance
-echo  Waiting 15 seconds before starting SWING account ^(Ollama warmup^)...
-timeout /t 15 /nobreak >nul
-start "SWING Account  [overnight]" cmd /k "%PYTHON% runners\run_live_combined.py --account swing"
-
-:: ── Open browser ─────────────────────────────────────────────────────────────
-timeout /t 5 /nobreak >nul
-start "" "http://localhost:%DASHBOARD_PORT%"
+python runners\run_live_combined.py
 
 echo.
-echo  All 3 processes started.
-echo.
-echo  Dashboard : http://localhost:%DASHBOARD_PORT%
-echo.
-echo  Logs:
-echo    ORB   : logs\bot_orb_YYYYMMDD_HHMMSS.log
-echo    SWING : logs\bot_swing_YYYYMMDD_HHMMSS.log
-echo.
-echo  Cache:
-echo    ORB   bias    : cache\daily_bias_orb.json
-echo    SWING bias    : cache\daily_bias_swing.json
-echo    ORB   journal : cache\trade_journal_orb.db
-echo    SWING journal : cache\trade_journal_swing.db
-echo.
-echo  Press any key to close this launcher.
-pause >nul
+echo  Bot stopped.
+pause

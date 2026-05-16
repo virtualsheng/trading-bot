@@ -17,7 +17,7 @@ BACKTEST-MODE BIAS:
   using the backtest engine's bar data via _run_eod_signals_backtest().
 
 PARAMETER PHILOSOPHY:
-  The PARAMS dict here mirrors the $2,000 live ORB account (run_live_orb_2k.py).
+  The PARAMS dict here mirrors the $2,000 live ORB account (run_live_combined.py).
   Single symbol (QQQ→TQQQ/SQQQ), $2k starting capital, 1 max position, 40% cap.
   PDT note: use a cash account on Alpaca — no day-trading restrictions apply
   and T+1 settlement is fine for 1 trade per day.
@@ -46,8 +46,8 @@ from strategies.trend_filtered_orb import TrendFilteredORB
 # Free Polygon tier: data available from roughly 2 years ago to present.
 # Best down-market period available: Apr 2025 tariff crash + Iran War volatility.
 # Adjust START/END to the period you want to test.
-START            = datetime(2024, 5, 15)
-END              = datetime(2026, 5, 15)
+START            = datetime(2025, 3, 1)
+END              = datetime(2025, 5, 15)
 
 # Match your actual live account size for realistic position sizing validation.
 # With $2,000 and max_position_pct=0.40, each position is capped at $800.
@@ -62,7 +62,7 @@ TICKERS = ["QQQ", "TQQQ", "SQQQ"]
 
 # ── Backtest-specific parameters ────────────────────────────────────────────
 # These OVERRIDE the strategy's live defaults for the backtest run only.
-# Mirrors the $2k live ORB account configuration in run_live_orb_2k.py.
+# Mirrors the $2k live ORB account configuration in run_live_combined.py.
 # Do NOT copy these into run_live_combined.py (full multi-symbol live account).
 PARAMS = {
     # ── Core ORB ────────────────────────────────────────────────────────────
@@ -204,7 +204,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"  Symbols        : {TICKERS}")
     print(f"  Period         : {START.date()} → {END.date()}")
-    print(f"  Starting Cap   : ${STARTING_CAPITAL:,} (mirrors $2k live ORB account)")
+    print(f"  Starting Cap   : ${STARTING_CAPITAL:,}")
     print(f"  Backtest mode  : live Alpaca API suppressed")
     print(f"  Ollama         : AI grading skipped (BACKTEST_MODE=true)")
     print(f"  PDT note       : use Alpaca cash account in live (T+1 settlement)")
@@ -232,7 +232,7 @@ if __name__ == "__main__":
         backtesting_end=END,
         pandas_data=pandas_data,
         parameters=PARAMS,
-        budget=STARTING_CAPITAL,
+        initial_portfolio_value=STARTING_CAPITAL,
         show_plot=True,
         show_tearsheet=True,
         save_tearsheet=True,
