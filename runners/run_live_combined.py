@@ -1,144 +1,62 @@
 """
-run_live_combined.py — Launch the Trend-Filtered ORB Strategy v6
-──────────────────────────────────────────────────────────────────
-Full AI-enhanced pipeline:
-  EOD Technical Signals (3:50 PM prelim + 4:15 PM final)
-  Morning ORB / Mean-Reversion → AI Grader → Regime Filter → Alpaca
+run_live_combined.py — Trend-Filtered ORB Strategy v17
+────────────────────────────────────────────────────────
+Unified launcher for both ORB intraday and Swing mode.
+Configured by default for a $2,000 cash account trading QQQ only.
 
-Switch paper/live: set ALPACA_IS_PAPER=true/false in .env
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ORB MODE (default, SWING_MODE=false in .env)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Signal: QQQ only (symbols.txt should contain just QQQ)
+  Execution: TQQQ (BUY signal) or SQQQ (SELL signal)
+  1 trade per day max — re-entry blocked after STOP or target passed
+  No hard target exit — 2% trailing stop + EOD close handles all exits
+  Stop arms 15 min after entry (protects against early wicks)
+  Stop placed at OR low (textbook ORB placement)
+  Account type: CASH — PDT rule does not apply
+  (Cash accounts settle T+1; fine for 1 trade/day)
 
-Swing Mode: set SWING_MODE=true in .env for tax-efficient long-term holding.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SWING MODE (SWING_MODE=true in .env)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Signal: all symbols in symbols.txt ranked by conviction
+  Up to 3 new BUY entries per day (highest conviction first)
+  Max 10 positions held concurrently at any time
+  Trades underlying ETF directly (no leverage)
+  Holds for weeks/months — sell on SELL signal or cooldown
+  30% of portfolio per position ($600 on $2k account)
+  target_exit=True for swing — takes defined profit at target
 
-run_live_combined.py — Launch the Trend-Filtered ORB Strategy v7
-──────────────────────────────────────────────────────────────────
-Full AI-enhanced pipeline:
-  EOD Technical Signals (3:50 PM prelim + 4:15 PM final)
-  Morning ORB / Mean-Reversion → AI Grader → Regime Filter → Alpaca
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ACCOUNT NOTES ($2,000 cash account)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Use Alpaca CASH account type — not margin
+  PDT rule requires $25k+ on margin accounts to make >3 day trades
+  per rolling 5-day window; cash accounts are exempt entirely
+  ORB:   2% risk = $40/trade, 40% cap = $800 max (~24 TQQQ shares)
+  Swing: 30% cap = $600/position, up to 3 new positions/day
 
 Switch paper/live: set ALPACA_IS_PAPER=true/false in .env
 Swing mode:        set SWING_MODE=true in .env
-
-Logging fix (v7):
-  Only a FileHandler is added to the root logger — NOT a StreamHandler.
-  LumiBot installs its own console handler at startup, so adding another
-  StreamHandler causes every line to print twice. The file handler alone
-  captures all output (LumiBot, strategy, ai_engine) to the log file.
-
-run_live_combined.py — Launch the Trend-Filtered ORB Strategy v8
-──────────────────────────────────────────────────────────────────
-v8 changes:
-  - FINAL EOD signals via after_market_closes() lifecycle hook
-  - File logging only (no duplicate StreamHandler)
-  - Sentiment URL corrected to /api/v1/analyze
-
-run_live_combined.py — Launch the Trend-Filtered ORB Strategy v9
-──────────────────────────────────────────────────────────────────
-v9 changes:
-  - sleeptime_orb = "2M" — 2-min iterations during 9:45 AM–noon ORB window
-  - sleeptime_default = "5M" — 5-min iterations outside ORB window
-  - after_market_closes delay = 5 min — waits for official close prices to settle
-  - All order direction bugs fixed (always BUY, never short-sell)
-  - File logging only (no duplicate StreamHandler)
-
-run_live_combined.py — Launch the Trend-Filtered ORB Strategy v10
-──────────────────────────────────────────────────────────────────
-v10: Dual-account support.
-
-Two TrendFilteredORB instances run simultaneously on a single LumiBot Trader:
-
-  ORB account  (ALPACA_API_KEY_ORB / ALPACA_API_SECRET_ORB)
-    swing_mode = False
-    Trades leveraged ETFs intraday — all positions closed by 3:45 PM.
-    Direct-trade positions held overnight until SELL signal.
-
-  Swing account (ALPACA_API_KEY_SWING / ALPACA_API_SECRET_SWING)
-    swing_mode = True
-    Enters on ORB breakouts, holds direct-trade positions long-term.
-    90-day sell cooldown per symbol, force-sell on extreme STRONG_SELL.
-
-Each instance has:
-  - Its own Alpaca broker connection (separate API keys)
-  - Its own isolated _positions / _orb_state / _trade_ids dicts
-  - Its own log file  (logs/bot_orb_YYYYMMDD.log / logs/bot_swing_YYYYMMDD.log)
-  - Its own bias cache (cache/daily_bias_orb.json / cache/daily_bias_swing.json)
-  - Its own trade journal (cache/trade_journal_orb.db / cache/trade_journal_swing.db)
-
-Shared across both instances (no duplication):
-  - Ollama (single warmup, both instances use same ai_engine module)
-  - Sentiment-Trading-Alpha (single background thread, result cached in memory)
-  - Earnings cache (shared module-level dict in earnings_filter.py)
-
-Both instances call startup_refresh() before the Trader starts, so both
-accounts have fresh bias signals and earnings cache before market open.
-
-run_live_combined.py — Launch the Trend-Filtered ORB Strategy v10
-──────────────────────────────────────────────────────────────────
-Dual-account mode: run two separate processes, one per account.
-
-    python runners/run_live_combined.py --account orb
-    python runners/run_live_combined.py --account swing
-
-Each process:
-  - Reads its own API keys (ALPACA_API_KEY_ORB / ALPACA_API_KEY_SWING)
-  - Writes to its own bias cache and trade journal
-  - Has its own log file
-
-The start_bot.bat launcher starts both processes in separate windows.
-LumiBot does not support multiple live strategies in one process.
 """
 
 import os
 import sys
 import logging
-import argparse
 from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
-# ── Parse account argument ────────────────────────────────────────────────────
-parser = argparse.ArgumentParser()
-parser.add_argument("--account", choices=["orb", "swing"], default="orb",
-                    help="Which account to run: orb (day trade) or swing (overnight)")
-args = parser.parse_args()
-ACCOUNT = args.account
-
-# ── Per-account config ────────────────────────────────────────────────────────
-ACCOUNT_META = {
-    "orb": {
-        "label":          "ORB (Day Trade)",
-        "key_env":        "ALPACA_API_KEY_ORB",
-        "secret_env":     "ALPACA_API_SECRET_ORB",
-        "paper_env":      "ALPACA_IS_PAPER_ORB",
-        "bias_cache":     "cache/daily_bias_orb.json",
-        "journal_db":     "cache/trade_journal_orb.db",
-        "log_prefix":     "bot_orb",
-        "swing_mode":     False,
-    },
-    "swing": {
-        "label":          "SWING (Overnight)",
-        "key_env":        "ALPACA_API_KEY_SWING",
-        "secret_env":     "ALPACA_API_SECRET_SWING",
-        "paper_env":      "ALPACA_IS_PAPER_SWING",
-        "bias_cache":     "cache/daily_bias_swing.json",
-        "journal_db":     "cache/trade_journal_swing.db",
-        "log_prefix":     "bot_swing",
-        "swing_mode":     True,
-    },
-}
-meta = ACCOUNT_META[ACCOUNT]
-
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── File logging only — LumiBot's own StreamHandler handles console ───────────
 os.makedirs("logs", exist_ok=True)
-_ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
-_log_file = f"logs/{meta['log_prefix']}_{_ts}.log"
-
+_log_file     = f"logs/bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 _file_handler = logging.FileHandler(_log_file, encoding="utf-8")
 _file_handler.setFormatter(
-    logging.Formatter(f"%(asctime)s | {ACCOUNT.upper()} | %(levelname)s | %(message)s")
+    logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 )
 logging.getLogger().addHandler(_file_handler)
 logging.getLogger().setLevel(logging.INFO)
-print(f"  [{ACCOUNT.upper()}] Logging to: {_log_file}")
+print(f"  Logging to: {_log_file}")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -148,110 +66,173 @@ from strategies.trend_filtered_orb import TrendFilteredORB
 
 
 def main():
-    api_key    = os.getenv(meta["key_env"])
-    api_secret = os.getenv(meta["secret_env"])
-    is_paper   = os.getenv(meta["paper_env"], "true").lower() == "true"
+    api_key    = os.getenv("ALPACA_API_KEY")
+    api_secret = os.getenv("ALPACA_API_SECRET")
+    is_paper   = os.getenv("ALPACA_IS_PAPER", "true").lower() == "true"
+    swing_mode = os.getenv("SWING_MODE", "false").lower() == "true"
 
     if not api_key or not api_secret:
-        print(f"❌ [{ACCOUNT.upper()}] Missing {meta['key_env']} or {meta['secret_env']} in .env")
-        sys.exit(1)
+        print("❌ Missing ALPACA_API_KEY or ALPACA_API_SECRET in .env")
+        return
 
-    PARAMS = {
-        # ── Per-instance paths ─────────────────────────────────────────────
-        "bias_cache_path":   meta["bias_cache"],
-        "journal_db_path":   meta["journal_db"],
-        "log_file_path":     _log_file,
-
-        # ── Iteration timing ──────────────────────────────────────────────
-        "sleeptime_orb":             "2M",
-        "sleeptime_default":         "5M",
-        "after_close_delay_minutes": 5,
-
-        # ── Strategy ──────────────────────────────────────────────────────
-        "orb_minutes":               15,
-        "bar_minutes":               5,
-        "risk_pct":                  0.01,
-        "reward_ratio":              2.0,
-        "eod_exit_time":             "15:45",
-        "max_positions":             8,
-        "ai_min_confidence":         0.55,
-        "hold_override":             False,
-        "hold_override_size":        0.5,
-        "min_stop_pct":              0.005,
-        "max_position_pct":          0.15,
-        "min_breakout_pct":          0.001,
-
-        # ── Swing mode ────────────────────────────────────────────────────
-        "swing_mode":                       meta["swing_mode"],
-        "swing_min_conviction":             75,
-        "swing_sell_cooldown_days":         90,
-        "swing_force_sell_conviction":      85,
-        "swing_force_sell_bear_score":      5,
-    }
-
-    broker   = Alpaca({
+    BROKER_CONFIG = {
         "API_KEY":    api_key,
         "API_SECRET": api_secret,
         "PAPER":      is_paper,
-    })
+    }
+
+    if swing_mode:
+        # ── Swing mode: multi-symbol, long-hold, $2k account ─────────────
+        PARAMS = {
+            "sleeptime_orb":             "2M",
+            "sleeptime_default":         "5M",
+            "after_close_delay_minutes": 5,
+            "orb_minutes":               15,
+            "bar_minutes":               5,
+            "risk_pct":                  0.02,
+            "reward_ratio":              2.0,
+            "eod_exit_time":             "15:45",
+            # Swing: up to 10 concurrent positions, 3 new entries per day max.
+            # 30% cap = $600 per position on a $2k account.
+            "max_positions":             10,
+            "max_position_pct":          0.30,
+            "min_stop_pct":              0.005,
+            "min_breakout_pct":          0.001,
+            "ai_min_confidence":         0.55,
+            "hold_override":             False,
+            "hold_override_size":        0.5,
+            "stop_mode":                 "or_low",
+            "stop_delay_minutes":        15,
+            # Swing exit: close at target (defined profit)
+            "target_exit":               True,
+            "target_scale_out":          1.0,
+            "trail_stop_pct":            0.02,
+            # Swing mode settings
+            "swing_mode":                True,
+            "swing_min_conviction":      70,
+            "swing_sell_cooldown_days":  60,
+            "swing_force_sell_conviction": 85,
+            "swing_force_sell_bear_score": 5,
+        }
+    else:
+        # ── ORB mode: single symbol (QQQ), $2k cash account ──────────────
+        PARAMS = {
+            "sleeptime_orb":             "2M",
+            "sleeptime_default":         "5M",
+            "after_close_delay_minutes": 5,
+            "orb_minutes":               15,
+            "bar_minutes":               5,
+            "risk_pct":                  0.02,   # 2% risk = $40 on $2k account
+            "reward_ratio":              2.0,    # 2:1 reference only (not a hard exit)
+            "eod_exit_time":             "15:45",
+            # ORB: 1 position max (QQQ only), 40% cap = $800 max position.
+            # Cash account: PDT rule does not apply. T+1 settlement is fine
+            # for 1 trade per day (funds available again next morning).
+            "max_positions":             1,
+            "max_position_pct":          0.40,   # 40% = ~$800 (~24 TQQQ shares at $33)
+            "min_stop_pct":              0.005,  # floor, scaled x3 = 1.5% for TQQQ/SQQQ
+            "min_breakout_pct":          0.001,
+            "ai_min_confidence":         0.55,
+            "hold_override":             False,
+            "hold_override_size":        0.5,
+            "stop_mode":                 "or_low",
+            "stop_delay_minutes":        15,
+            # Trail-only exit: NO hard target close.
+            # 2% trail is wide enough for 3x ETF intrabar noise (~0.9-1.5%)
+            # while still catching genuine reversals. EOD close at 3:45 PM
+            # captures the ~60% of trending days that continue into the close.
+            "target_exit":               False,  # let trail + EOD handle exit
+            "target_scale_out":          1.0,    # unused when target_exit=False
+            "trail_stop_pct":            0.02,   # 2% trailing stop
+            "swing_mode":                False,
+        }
+
+    broker   = Alpaca(BROKER_CONFIG)
     strategy = TrendFilteredORB(
         broker=broker,
         parameters=PARAMS,
-        name=ACCOUNT.upper(),
+        name="TrendFilteredORB",
     )
 
     trader = Trader()
     trader.add_strategy(strategy)
 
-    # ── Banner ─────────────────────────────────────────────────────────────
-    mode                 = "📄 PAPER TRADING" if is_paper else "💰 LIVE TRADING ⚠️"
+    mode = "📄 PAPER TRADING" if is_paper else "💰 LIVE TRADING ⚠️ REAL MONEY"
     sentiment_base       = os.getenv("SENTIMENT_API_URL", "http://localhost:8000")
     sentiment_configured = bool(os.getenv("SENTIMENT_ADMIN_TOKEN", ""))
 
-    print("\n" + "=" * 70)
-    print(f"  🚀  {meta['label'].upper()} — v10")
-    print("=" * 70)
-    print(f"  Account           : {ACCOUNT.upper()}")
+    print("\n" + "=" * 65)
+    if swing_mode:
+        print("  🌿  TREND-FILTERED ORB — SWING MODE  v17")
+    else:
+        print("  🚀  TREND-FILTERED ORB — ORB INTRADAY MODE  v17")
+    print("=" * 65)
     print(f"  Mode              : {mode}")
-    print(f"  API Key           : ...{api_key[-6:]}")
-    print(f"  Swing Mode        : {'✅ ON' if PARAMS['swing_mode'] else '❌ off'}")
-    print(f"  Symbols           : symbols.txt ({_count_symbols()} symbols)")
-    print(f"  Base Risk/Trade   : {PARAMS['risk_pct']*100:.0f}% (AI scales to 2x max)")
-    print(f"  Max Positions     : {PARAMS['max_positions']}")
-    print(f"  Max Position Size : {PARAMS['max_position_pct']*100:.0f}% of portfolio")
-    print(f"  Min Stop Distance : {PARAMS['min_stop_pct']*100:.1f}% of price")
-    print(f"  Min Breakout      : {PARAMS['min_breakout_pct']*100:.1f}% beyond OR")
-    print(f"  AI Min Confidence : {PARAMS['ai_min_confidence']}")
+    print(f"  Account type      : CASH (PDT rule does not apply)")
+    if swing_mode:
+        print(f"  Strategy          : Swing — multi-symbol, long holds")
+        print(f"  Symbols           : symbols.txt ({_count_symbols()} symbols)")
+        print(f"  Max Positions     : {PARAMS['max_positions']} concurrent")
+        print(f"  Max Pos Size      : {int(PARAMS['max_position_pct']*100)}% = "
+              f"~$600 per position on $2k account")
+        print(f"  New entries/day   : 3 max (highest conviction from signals)")
+        print(f"  Target exit       : enabled (closes at target)")
+        print(f"  Trail stop        : {int(PARAMS['trail_stop_pct']*100)}%")
+        print(f"  Sell cooldown     : {PARAMS['swing_sell_cooldown_days']}d")
+        print(f"  Min conviction    : {PARAMS['swing_min_conviction']}")
+    else:
+        print(f"  Strategy          : ORB intraday — QQQ only")
+        print(f"  Symbols file      : symbols.txt (should contain: QQQ)")
+        print(f"  Execution         : TQQQ (bull) / SQQQ (bear)")
+        print(f"  Max Positions     : {PARAMS['max_positions']} (one trade at a time)")
+        print(f"  Max Pos Size      : {int(PARAMS['max_position_pct']*100)}% = "
+              f"~$800 (~24 TQQQ shares at $33)")
+        print(f"  Target exit       : DISABLED — trail + EOD handles all exits")
+        print(f"  Trail stop        : {int(PARAMS['trail_stop_pct']*100)}% "
+              f"(ratchets up, never down)")
+        print(f"  1 trade/day       : re-entry blocked after STOP or target passed")
+    print(f"  Base Risk/Trade   : {int(PARAMS['risk_pct']*100)}% = "
+          f"~$40 at risk on $2k account")
+    print(f"  Reward:Risk ref   : {PARAMS['reward_ratio']:.0f}:1 (~$80 target reference)")
+    print(f"  Stop Mode         : {PARAMS['stop_mode']} "
+          f"(delay {PARAMS['stop_delay_minutes']} min)")
     print(f"  ORB Iteration     : {PARAMS['sleeptime_orb']} (9:45 AM–noon)")
     print(f"  Off-ORB Iteration : {PARAMS['sleeptime_default']}")
     print(f"  After-Close Delay : {PARAMS['after_close_delay_minutes']} min")
-    if PARAMS["swing_mode"]:
-        print(f"  Swing Min Conv.   : {PARAMS['swing_min_conviction']}")
-        print(f"  Sell Cooldown     : {PARAMS['swing_sell_cooldown_days']}d")
-        print(f"  Force-Sell Conv.  : {PARAMS['swing_force_sell_conviction']}")
-        print(f"  Force-Sell Bear≥  : {PARAMS['swing_force_sell_bear_score']}")
-    print(f"  Ollama Model      : llama3.2:3b (localhost:11434)")
-    print(f"  Bias Cache        : {meta['bias_cache']}")
-    print(f"  Trade Journal     : {meta['journal_db']}")
+    print(f"  AI Min Confidence : {PARAMS['ai_min_confidence']}")
+    print(f"  Ollama Model      : qwen3:8b (localhost:11434)")
+    print(f"  Trade Journal     : cache/trade_journal.db")
     print(f"  Log File          : {_log_file}")
     print(f"  Sentiment Alpha   : {sentiment_base}/api/v1/analyze "
           f"({'token set ✅' if sentiment_configured else 'no token ⚠️'})")
-    print("=" * 70)
+    print("=" * 65)
     print()
-    print("  Trade model: ALWAYS BUY — never short-sell")
-    if PARAMS["swing_mode"]:
-        print("  • BUY signal  → BUY direct-trade stock (no leveraged ETFs in swing mode)")
-        print("  • SELL signal → skip new entries; close existing position if signal flips")
-        print("  • HOLD signal → BUY direct-trade stock on upside breakout (0.5× size)")
-    else:
-        print("  • BUY signal  → BUY bull leveraged ETF (e.g. QQQ→TQQQ)")
-        print("  • SELL signal → BUY inverse ETF (e.g. IBIT→BITI) if one exists")
-        print("  • HOLD signal → BUY bull ETF on upside breakout (0.5× size)")
+    if not swing_mode:
+        print("  Exit logic (trail-only, ORB mode):")
+        print("  • First 15 min: stop is INACTIVE (stop_delay_minutes=15)")
+        print("  • After 15 min: stop arms at OR low level")
+        print("  • As price rises: trail ratchets up 2% below highest seen")
+        print("  • Trail hit     → close with locked-in gains")
+        print("  • Target passed → log milestone, position CONTINUES")
+        print("  • 3:45 PM EOD   → TQQQ/SQQQ forced close")
+    print()
+    print("  Daily schedule:")
+    print("  • Script start    — Ollama warmup + bias refresh")
+    print("  • ~9:00 AM ET     — Earnings cache cleared, regime pre-warmed")
+    print("  • 9:30 AM ET      — Position sync from Alpaca")
+    print("  • 9:45 AM – noon  — ORB entry window (2-min iterations)")
+    print("  • Noon – 3:45 PM  — Monitor + trailing stop (5-min iterations)")
+    print("  • 3:45 PM ET      — Leveraged/inverse ETFs forced close")
+    print("  • 3:50 PM ET      — PRELIM EOD signals")
+    print("  • ~4:05 PM ET     — FINAL EOD signals (after_market_closes)")
+    print()
+    print("  ⚠️  CASH ACCOUNT: funds settle T+1 after each trade close.")
+    print("      1 trade/day means funds are always available next morning.")
     print()
     print("  To stop: Ctrl+C")
-    print("=" * 70 + "\n")
+    print("=" * 65 + "\n")
 
-    print(f"  🔄 [{ACCOUNT.upper()}] Running startup refresh...")
+    print("  🔄 Running startup refresh (bias + earnings cache)...")
     print()
     strategy.startup_refresh()
 

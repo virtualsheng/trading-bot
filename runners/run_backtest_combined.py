@@ -15,6 +15,13 @@ BACKTEST-MODE BIAS:
   by setting LUMIBOT_BACKTEST_MODE=true and pre-seeding the bias cache
   with a neutral HOLD. The strategy will update bias each simulated EOD
   using the backtest engine's bar data via _run_eod_signals_backtest().
+
+PARAMETER PHILOSOPHY:
+  The PARAMS dict here mirrors the $2,000 live ORB account (run_live_orb_2k.py).
+  Single symbol (QQQ→TQQQ/SQQQ), $2k starting capital, 1 max position, 40% cap.
+  PDT note: use a cash account on Alpaca — no day-trading restrictions apply
+  and T+1 settlement is fine for 1 trade per day.
+  Do NOT copy these params into run_live_combined.py (full multi-symbol account).
 """
 
 import os
@@ -35,30 +42,69 @@ from lumibot.backtesting import PandasDataBacktesting
 from lumibot.entities import Asset, Data
 from strategies.trend_filtered_orb import TrendFilteredORB
 
-# ── Configuration ──────────────────────────────────────────────────────────────
-START            = datetime(2024, 7, 1)
-END              = datetime(2025, 7, 1)
-STARTING_CAPITAL = 10_000
+# ── Date range ──────────────────────────────────────────────────────────────
+# Free Polygon tier: data available from roughly 2 years ago to present.
+# Best down-market period available: Apr 2025 tariff crash + Iran War volatility.
+# Adjust START/END to the period you want to test.
+START            = datetime(2024, 5, 15)
+END              = datetime(2026, 5, 15)
+
+# Match your actual live account size for realistic position sizing validation.
+# With $2,000 and max_position_pct=0.40, each position is capped at $800.
+# TQQQ at ~$33 = ~24 shares per trade — realistic for a $2k cash account.
+STARTING_CAPITAL = 2_000
 CACHE_DIR        = "cache"
 
+# ── Single symbol — mirrors the $2k live ORB account ────────────────────────
+# QQQ is the signal symbol; the strategy maps it to TQQQ (bull) / SQQQ (bear).
+# Only these 3 tickers need to be fetched and loaded.
 TICKERS = ["QQQ", "TQQQ", "SQQQ"]
 
+# ── Backtest-specific parameters ────────────────────────────────────────────
+# These OVERRIDE the strategy's live defaults for the backtest run only.
+# Mirrors the $2k live ORB account configuration in run_live_orb_2k.py.
+# Do NOT copy these into run_live_combined.py (full multi-symbol live account).
 PARAMS = {
+    # ── Core ORB ────────────────────────────────────────────────────────────
     "orb_minutes":        15,
     "bar_minutes":        5,
-    "risk_pct":           0.01,
-    "reward_ratio":       2.0,
+    "risk_pct":           0.02,    # 2% risk per trade = $40 on a $2k account
+    "reward_ratio":       2.0,     # 2:1 reward:risk → $80 target per trade
     "eod_exit_time":      "15:45",
-    "max_positions":      8,
+
+    # ── Position limits ($2k single-symbol account) ──────────────────────────
+    # 1 position max — only trading QQQ→TQQQ/SQQQ, no need for more slots.
+    # PDT note: Alpaca cash account settles T+1 — safe for 1 trade/day with no
+    # day-trading restrictions (PDT rule applies to margin accounts only).
+    "max_positions":      1,
+    "max_position_pct":   0.40,    # 40% cap = $800 max position on $2k account
+
+    # ── AI / signal ─────────────────────────────────────────────────────────
     "ai_min_confidence":  0.55,
     "hold_override":      False,
     "hold_override_size": 0.5,
+
+    # ── Stop placement (v15) ─────────────────────────────────────────────────
+    "stop_mode":           "or_low", # stop at OR low — textbook ORB placement
+    "stop_delay_minutes":  15,       # ignore stop for first 15 min after entry
+    "min_stop_pct":        0.005,    # floor; scaled ×3 for TQQQ/SQQQ = 1.5%
+
+    # ── Trail-only exit (v17) ────────────────────────────────────────────
+    # target_exit=False: no hard target close. Trail + EOD handles all exits.
+    # 2% trail on TQQQ/SQQQ sits above normal intrabar noise (~0.9-1.5%)
+    # while catching genuine reversals. Mirrors run_live_combined.py ORB mode.
+    "target_exit":        False,  # let trail + EOD handle exit
+    "target_scale_out":   1.0,    # unused when target_exit=False
+    "trail_stop_pct":     0.02,   # 2% trailing stop
+
+    # ── Breakout filter ──────────────────────────────────────────────────────
+    "min_breakout_pct":   0.001,  # price must clear OR high by at least 0.1%
 }
 
-RATE_LIMIT_DELAY = 13
+RATE_LIMIT_DELAY = 13  # seconds between Polygon API pages (free tier: 5 req/min)
 
 
-# ── Bias seed ──────────────────────────────────────────────────────────────────
+# ── Bias seed ────────────────────────────────────────────────────────────────
 
 def write_neutral_bias(symbols: list, start: datetime):
     """
@@ -66,46 +112,47 @@ def write_neutral_bias(symbols: list, start: datetime):
     Prevents stale live-API signals from leaking into the simulation.
     The strategy updates this each simulated EOD via _run_eod_signals_backtest().
     """
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs("cache", exist_ok=True)
     bias = {
         s: {
-            "action": "HOLD", "bull_score": 0, "bear_score": 0,
-            "rsi": 50.0, "vol_ratio": 1.0,
-            "date": start.strftime("%Y-%m-%d"), "source": "BACKTEST_INIT",
+            "action":     "HOLD",
+            "bull_score": 0,
+            "bear_score": 0,
+            "rsi":        50,
+            "vol_ratio":  1.0,
+            "date":       str(start.date()),
+            "source":     "backtest_seed",
         }
         for s in symbols
     }
-    path = os.path.join(CACHE_DIR, "daily_bias_backtest.json")
+    path = "cache/daily_bias_backtest.json"
     with open(path, "w") as f:
         json.dump(bias, f, indent=2)
-    print(f"✅ Neutral bias written for {len(bias)} symbols → {path}")
+    print(f"✅ Neutral bias written for {len(symbols)} symbols → {path}")
 
 
-# ── Polygon fetcher ────────────────────────────────────────────────────────────
+# ── Polygon data fetcher ─────────────────────────────────────────────────────
 
 def fetch_from_polygon(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
     api_key = os.getenv("POLYGON_API_KEY")
     if not api_key:
-        raise ValueError("POLYGON_API_KEY not found in .env")
+        raise ValueError("POLYGON_API_KEY not set in .env")
 
-    all_bars, page = [], 1
     url = (
-        f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/5/minute"
-        f"/{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
+        f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/5/minute/"
+        f"{start.date()}/{end.date()}"
         f"?adjusted=true&sort=asc&limit=50000&apiKey={api_key}"
     )
 
+    all_bars = []
+    page = 1
     while url:
         print(f"  [{symbol}] Page {page}...")
         resp = requests.get(url, timeout=30)
-        if resp.status_code == 429:
-            print(f"  Rate limited — waiting 60s...")
-            time.sleep(60)
-            continue
         resp.raise_for_status()
         data = resp.json()
-        all_bars.extend(data.get("results", []))
-        print(f"  [{symbol}] {len(all_bars)} bars so far")
+        bars = data.get("results", [])
+        all_bars.extend(bars)
         next_url = data.get("next_url")
         if next_url:
             url = f"{next_url}&apiKey={api_key}"
@@ -149,7 +196,7 @@ def get_cached_data(symbol: str, start: datetime, end: datetime) -> pd.DataFrame
     return df
 
 
-# ── Main ────────────────────────────────────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("=" * 60)
@@ -157,9 +204,14 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"  Symbols        : {TICKERS}")
     print(f"  Period         : {START.date()} → {END.date()}")
-    print(f"  Starting Cap   : ${STARTING_CAPITAL:,}")
+    print(f"  Starting Cap   : ${STARTING_CAPITAL:,} (mirrors $2k live ORB account)")
     print(f"  Backtest mode  : live Alpaca API suppressed")
-    print(f"  Ollama         : must be running for AI grading")
+    print(f"  Ollama         : AI grading skipped (BACKTEST_MODE=true)")
+    print(f"  PDT note       : use Alpaca cash account in live (T+1 settlement)")
+    print(f"  Stop mode      : {PARAMS['stop_mode']} (delay {PARAMS['stop_delay_minutes']} min)")
+    print(f"  Trail stop     : {int(PARAMS['trail_stop_pct']*100)}% trailing stop (no hard target exit)")
+    print(f"  Max positions  : {PARAMS['max_positions']} | "
+          f"Max pos size: {int(PARAMS['max_position_pct']*100)}%")
     print("=" * 60 + "\n")
 
     write_neutral_bias(["QQQ"], START)
@@ -180,12 +232,12 @@ if __name__ == "__main__":
         backtesting_end=END,
         pandas_data=pandas_data,
         parameters=PARAMS,
-        initial_portfolio_value=STARTING_CAPITAL,
+        budget=STARTING_CAPITAL,
         show_plot=True,
         show_tearsheet=True,
         save_tearsheet=True,
     )
 
     print("\n" + "=" * 60)
-    print("BACKTEST COMPLETE — check logs/ for tearsheet")
+    print("BACKTEST COMPLETE — check logs/ for tearsheet and trades CSV")
     print("=" * 60)
