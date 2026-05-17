@@ -50,49 +50,44 @@ START            = datetime(2025, 3, 1)
 END              = datetime(2025, 5, 15)
 
 # Match your actual live account size for realistic position sizing validation.
-# With $2,000 and max_position_pct=0.40, each position is capped at $800.
-# TQQQ at ~$33 = ~24 shares per trade — realistic for a $2k cash account.
+# risk_pct=0.10, max_position_pct=1.0 → fills account up to value cap.
 STARTING_CAPITAL = 2_000
 CACHE_DIR        = "cache"
 
-# ── Single symbol — mirrors the $2k live ORB account ────────────────────────
-# QQQ is the signal symbol; the strategy maps it to TQQQ (bull) / SQQQ (bear).
-# Only these 3 tickers need to be fetched and loaded.
-TICKERS = ["QQQ", "TQQQ", "SQQQ"]
+# ── Signal symbols — mirrors live account ────────────────────────────────────
+# QQQ → TQQQ (bull) / SQQQ (bear)
+# SMH → SOXL (bull) / SOXS (bear)
+TICKERS = ["QQQ", "TQQQ", "SQQQ", "SMH", "SOXL", "SOXS"]
 
 # ── Backtest-specific parameters ────────────────────────────────────────────
 # These OVERRIDE the strategy's live defaults for the backtest run only.
-# Mirrors the $2k live ORB account configuration in run_live_combined.py.
-# Do NOT copy these into run_live_combined.py (full multi-symbol live account).
+# Must mirror run_live_combined.py exactly so backtest results are comparable.
 PARAMS = {
     # ── Core ORB ────────────────────────────────────────────────────────────
     "orb_minutes":        15,
     "bar_minutes":        5,
-    "risk_pct":           0.02,    # 2% risk per trade = $40 on a $2k account
-    "reward_ratio":       2.0,     # 2:1 reward:risk → $80 target per trade
-    "eod_exit_time":      "15:45",
+    "risk_pct":           0.10,    # 10% max loss per trade = $200 on $2k
+    "reward_ratio":       2.0,
+    "eod_exit_time":      "15:56",
 
-    # ── Position limits ($2k single-symbol account) ──────────────────────────
-    # 1 position max — only trading QQQ→TQQQ/SQQQ, no need for more slots.
-    # PDT note: Alpaca cash account settles T+1 — safe for 1 trade/day with no
-    # day-trading restrictions (PDT rule applies to margin accounts only).
-    "max_positions":      1,
-    "max_position_pct":   0.40,    # 40% cap = $800 max position on $2k account
+    # ── Position limits ──────────────────────────────────────────────────────
+    # 2 positions max — one per symbol (QQQ and SMH).
+    # Capital split proportional to conviction score at entry time.
+    # max_position_pct=1.0 → full account deployable across positions.
+    "max_positions":      2,
+    "max_position_pct":   1.0,
 
     # ── AI / signal ─────────────────────────────────────────────────────────
     "ai_min_confidence":  0.55,
     "hold_override":      False,
     "hold_override_size": 0.5,
 
-    # ── Stop placement (v15) ─────────────────────────────────────────────────
-    "stop_mode":           "or_low", # stop at OR low — textbook ORB placement
-    "stop_delay_minutes":  15,       # ignore stop for first 15 min after entry
-    "min_stop_pct":        0.005,    # floor; scaled ×3 for TQQQ/SQQQ = 1.5%
+    # ── Stop placement ───────────────────────────────────────────────────────
+    "stop_mode":           "or_low",
+    "stop_delay_minutes":  15,
+    "min_stop_pct":        0.005,
 
-    # ── Trail-only exit (v17) ────────────────────────────────────────────
-    # target_exit=False: no hard target close. Trail + EOD handles all exits.
-    # 2% trail on TQQQ/SQQQ sits above normal intrabar noise (~0.9-1.5%)
-    # while catching genuine reversals. Mirrors run_live_combined.py ORB mode.
+    # ── Trail-only exit ──────────────────────────────────────────────────────
     "target_exit":        False,  # let trail + EOD handle exit
     "target_scale_out":   1.0,    # unused when target_exit=False
     "trail_stop_pct":     0.02,   # 2% trailing stop

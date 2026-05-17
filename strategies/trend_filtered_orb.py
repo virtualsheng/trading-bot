@@ -444,14 +444,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from strategies.signal_engine import get_technical_signal
-from strategies.leverage_map import get_leveraged_pair, is_direct_trade
+from strategies.leverage_map import get_leveraged_pair, is_direct_trade, get_all_signal_symbols, get_all_exec_tickers
 from strategies.ai_engine import (
     check_ollama_available, grade_setup,
     detect_regime, get_cached_regime, narrate_trade,
 )
 from strategies.trade_journal import TradeJournal
 try:
-    from strategies.expected_move import get_qqq_expected_move, em_context_for_trade
+    from strategies.expected_move import get_expected_move, get_qqq_expected_move, get_all_expected_moves, em_context_for_trade
     _EM_AVAILABLE = True
 except ImportError:
     _EM_AVAILABLE = False
@@ -468,8 +468,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Trading bot trades QQQ only → TQQQ (bull) or SQQQ (bear). No symbols.txt needed.
-SIGNAL_SYMBOL = "QQQ"
+# Signal symbols the bot monitors. Execution ETFs come from leverage_map.py.
+# QQQ → TQQQ (bull) / SQQQ (bear)   Nasdaq-100 3×
+# SMH → SOXL (bull) / SOXS (bear)   Semiconductor 3×
+SIGNAL_SYMBOLS = ["QQQ", "SMH"]
+SIGNAL_SYMBOL  = SIGNAL_SYMBOLS[0]   # legacy compat — primary signal for logging
 BIAS_CACHE          = "cache/daily_bias.json"
 BIAS_CACHE_BACKTEST = "cache/daily_bias_backtest.json"
 
@@ -481,11 +484,11 @@ MARKET_CLOSE_TIME = dtime(16, 25)
 
 # ORB entry window — 2-min iterations during this window
 ORB_ENTRY_START = dtime(9, 45)
-ORB_ENTRY_END   = dtime(12, 0)
+ORB_ENTRY_END   = dtime(10, 30)  # 10:30 AM cutoff — late ORB entries have lower win rates
 
-LEVERAGED_TICKERS = {
-    "TQQQ", "SQQQ",   # the only leveraged ETFs this bot trades
-}
+# All execution tickers — derived from leverage_map so adding a new symbol
+# to LEVERAGE_MAP automatically includes its ETFs here.
+LEVERAGED_TICKERS = get_all_exec_tickers()   # {"TQQQ","SQQQ","SOXL","SOXS"}
 
 
 def is_leveraged(ticker: str) -> bool:
@@ -500,16 +503,21 @@ class TrendFilteredORB(Strategy):
         "after_close_delay_minutes": 5,
         "orb_minutes":               15,
         "bar_minutes":               5,
-        "risk_pct":                  0.01,
+        "risk_pct":                  0.10,   # max loss per trade as % of portfolio (10% = $200 on $2k)
         "reward_ratio":              2.0,
-        "eod_exit_time":             "15:45",
+        "eod_exit_time":             "15:56",   # 3:56 PM — maximize gains before 4 PM
         # Live defaults — backtest runner overrides these in PARAMS
-        "max_positions":             10,   # live: 10 concurrent positions
+        "max_positions":             1,    # 1 trade at a time (QQQ only)
         "ai_min_confidence":         0.55,
         "hold_override":             False,
         "hold_override_size":        0.5,
         "min_stop_pct":              0.005,
-        "max_position_pct":          0.10,  # live: 10% max per position
+        # max_position_pct = total capital to deploy across all active positions.
+        # For a single symbol (QQQ only): 1.0 = use full account on one trade.
+        # For multiple symbols: capital is split proportional to conviction score.
+        #   e.g. QQQ cv=83, SMH cv=52 → QQQ gets 61%, SMH gets 39% of total pool.
+        # risk_pct remains the max loss per trade regardless of position size.
+        "max_position_pct":          1.0,   # total capital to deploy across all positions (1.0 = full account)
         "min_breakout_pct":          0.001,
         # ── Trailing stop ─────────────────────────────────────────────────
         # trail_stop_pct: trailing stop % below the highest price seen since entry.
@@ -562,9 +570,10 @@ class TrendFilteredORB(Strategy):
         self._regime_checked_at    = None
         self._in_orb_window        = False
 
-        self._orb_state  = {}
-        self._positions  = {}
-        self._trade_ids  = {}
+        self._orb_state   = {}
+        self._positions   = {}
+        self._trade_ids   = {}
+        self._traded_today = set()  # symbols traded today — blocks re-entry
         self._daily_bias = self._load_bias()
         self._journal    = TradeJournal()
 
@@ -601,9 +610,15 @@ class TrendFilteredORB(Strategy):
         print("[startup] Pre-warming earnings cache...")
         try:
             from strategies.earnings_filter import prefetch_earnings
-            symbols = self._load_symbols()
-            prefetch_earnings(symbols)
-            print(f"[startup] Earnings cache ready for {len(symbols)} symbols")
+            ETF_SYMBOLS = {"QQQ", "SMH", "SPY", "IWM", "DIA", "XLK", "XLF",
+                           "TQQQ", "SQQQ", "SOXL", "SOXS"}
+            # Only prefetch for non-ETF symbols — ETFs have no earnings
+            non_etf = [s for s in self._load_symbols() if s.upper() not in ETF_SYMBOLS]
+            if non_etf:
+                prefetch_earnings(non_etf)
+                print(f"[startup] Earnings cache ready for {len(non_etf)} symbols")
+            else:
+                print("[startup] All symbols are ETFs — skipping earnings prefetch")
         except Exception as e:
             print(f"[startup] Earnings pre-fetch skipped: {e}")
 
@@ -681,7 +696,6 @@ class TrendFilteredORB(Strategy):
         try:
             self._run_eod_signals(label="FINAL")
             self._final_signals_done = True
-            self._check_and_close_sell_signals(reason="FINAL_SELL_SIGNAL")
         except Exception as e:
             self.log_message(f"FINAL signals error: {e}")
 
@@ -698,6 +712,7 @@ class TrendFilteredORB(Strategy):
             self._market_opened_today = False
             self._in_orb_window       = False
             self._orb_state           = {}
+            self._traded_today        = set()   # reset daily trade tracker
 
         is_weekday = now.weekday() < 5
         in_session = MARKET_OPEN_TIME <= now.time() <= MARKET_CLOSE_TIME
@@ -709,23 +724,29 @@ class TrendFilteredORB(Strategy):
             self._market_opened_today = True
             self.log_message(f"Market open | {len(self._positions)} positions carried")
 
-        # ── Dynamic sleeptime ─────────────────────────────────────────────
-        # Switch to 2-min iterations at start of ORB window,
-        # back to 5-min after noon.
+        # ── 2-minute iterations all day ───────────────────────────────────
+        # ORB entry window: 9:45–10:30 AM
+        # Position monitoring (stop/trail/EM): active until position closes
+        # Once ORB window closes and no positions held, only EOD signals matter
         in_orb = ORB_ENTRY_START <= now.time() <= ORB_ENTRY_END
+        if self.sleeptime != "2M":
+            self.sleeptime = "2M"
         if in_orb and not self._in_orb_window:
-            self.sleeptime = self.parameters.get("sleeptime_orb", "2M")
             self._in_orb_window = True
-            self.log_message(
-                f"ORB window open — switching to "
-                f"{self.parameters['sleeptime_orb']} iterations"
-            )
+            self.log_message("ORB window open (9:45–10:30 AM)")
         elif not in_orb and self._in_orb_window:
-            self.sleeptime = self.parameters.get("sleeptime_default", "5M")
             self._in_orb_window = False
-            self.log_message(
-                f"ORB window closed — {self.parameters['sleeptime_default']} iterations"
-            )
+            if not self._positions:
+                self.log_message("ORB window closed — no position taken today, monitoring EOD signals only")
+            else:
+                self.log_message("ORB window closed — monitoring open position every 2M")
+
+        # Skip iterations after ORB window if no positions — nothing to do
+        # until EOD signal runs at 3:50 PM
+        if not in_orb and not self._positions:
+            eod_h, eod_m = map(int, self.parameters["eod_exit_time"].split(":"))
+            if now.time() < dtime(SIGNAL_PRELIM_HOUR, SIGNAL_PRELIM_MINUTE):
+                return  # nothing to do — wait for EOD signals
 
         eod_h, eod_m = map(int, self.parameters["eod_exit_time"].split(":"))
         if now.time() >= dtime(eod_h, eod_m):
@@ -736,12 +757,10 @@ class TrendFilteredORB(Strategy):
             self.log_message("3:50 PM — running preliminary EOD signals")
             self._run_eod_signals(label="PRELIM")
             self._prelim_signals_done = True
-            self._check_and_close_sell_signals(reason="PRELIM_SELL_SIGNAL")
 
         if now.time() >= dtime(eod_h, eod_m):
             return
 
-        self._check_and_close_sell_signals(reason="SELL_SIGNAL")
 
         if (os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() != "true" and
                 (self._regime_checked_at is None or
@@ -751,7 +770,7 @@ class TrendFilteredORB(Strategy):
 
         self._monitor_open_positions()
 
-        # ── ORB entries 9:45 AM – noon ─────────────────────────────────
+        # ── ORB entries 9:45 AM – 10:30 AM ───────────────────────────────
         if in_orb:
             max_pos    = self.parameters["max_positions"]
             slots_free = max_pos - len(self._positions)
@@ -759,6 +778,8 @@ class TrendFilteredORB(Strategy):
             if slots_free > 0:
                 candidates = []
                 for symbol in self._load_symbols():
+                    if symbol in self._traded_today:
+                        continue
                     try:
                         c = self._process_symbol(symbol, now, today)
                         if c is not None:
@@ -775,14 +796,17 @@ class TrendFilteredORB(Strategy):
                         f"Candidates [{len(candidates)}] ranked: {ranked_log} | "
                         f"slots free: {slots_free}/{max_pos}"
                     )
+                    # Conviction-weighted capital allocation across candidates
+                    top_candidates = candidates[:slots_free]
+                    capital_alloc  = self._allocate_capital(top_candidates)
                     executed = 0
-                    for c in candidates:
+                    for c in top_candidates:
                         if executed >= slots_free or len(self._positions) >= max_pos:
-                            self.log_message(
-                                f"SKIP {c['symbol']} (conviction:{c['conviction']:.0f}) "
-                                f"— max_positions ({max_pos}) reached"
-                            )
-                            continue
+                            break
+                        c["allocated_capital"] = capital_alloc.get(
+                            c["symbol"],
+                            self.portfolio_value * self.parameters.get("max_position_pct", 1.0)
+                        )
                         self._execute_candidate(c)
                         executed += 1
 
@@ -960,17 +984,17 @@ class TrendFilteredORB(Strategy):
                 # ── 4. EM upper boundary exit ────────────────────────────
                 # If price reaches the options-implied daily expected move upper
                 # boundary, the market has priced in its maximum expected move.
-                # Statistically the right time to take profits rather than wait.
-                em_exit = self.parameters.get("em_boundary_exit", True)
-                if em_exit and _EM_AVAILABLE and not pos.get("em_exit_checked", False):
+                # Skipped in backtest: today's EM options prices don't apply to
+                # historical TQQQ/SQQQ prices from prior years.
+                em_exit    = self.parameters.get("em_boundary_exit", True)
+                is_backtest = os.getenv("LUMIBOT_BACKTEST_MODE","").lower() == "true"
+                if em_exit and _EM_AVAILABLE and not is_backtest and not pos.get("em_exit_checked", False):
                     try:
-                        em = get_qqq_expected_move()
+                        sig_sym = pos.get("signal_symbol", "QQQ")
+                        em = get_expected_move(sig_sym)
                         if em:
-                            # Use TQQQ upper if that's what we're holding
-                            em_upper = em.get("tqqq_daily_upper", 0)
-                            if exec_ticker == "SQQQ":
-                                # SQQQ profits when QQQ goes down — exit at lower EM
-                                em_upper = em.get("tqqq_daily_upper", 0)  # symmetric
+                            # Use exec_ticker upper bound
+                            em_upper = em.get("exec_daily_upper", 0)
                             if em_upper > 0 and current >= em_upper:
                                 pnl_now = (current - pos["entry_price"]) * pos.get("qty", 0)
                                 self.log_message(
@@ -1107,9 +1131,8 @@ class TrendFilteredORB(Strategy):
 
         api_key    = os.getenv("ALPACA_API_KEY")
         secret_key = os.getenv("ALPACA_API_SECRET")
-        symbols    = self._load_symbols()
-
-        self.log_message(f"[{label}] Running signals for {len(symbols)} symbols...")
+        symbols = self._load_symbols()   # ["QQQ", "SMH"]
+        self.log_message(f"[{label}] Running signals for {len(symbols)} symbols: {symbols}")
         new_bias = {}
         buys, sells = [], []
 
@@ -1152,25 +1175,30 @@ class TrendFilteredORB(Strategy):
         em_text = ""
         if _EM_AVAILABLE and label in ("FINAL", "PRELIM", "EOD"):
             try:
-                em = get_qqq_expected_move(force=True)
-                if em:
-                    em_text = (
-                        f"\nQQQ expected move: "
-                        f"daily ±${em['daily_em']:.2f} ({em['daily_em_pct']:.1f}%) "
-                        f"[${em['daily_lower']:.2f}–${em['daily_upper']:.2f}]\n"
-                        f"Weekly ±${em['weekly_em']:.2f} "
-                        f"[${em['weekly_lower']:.2f}–${em['weekly_upper']:.2f}]\n"
-                        f"TQQQ/SQQQ daily EM: ±${em['tqqq_daily_em']:.2f} "
-                        f"[${em['tqqq_daily_lower']:.2f}–${em['tqqq_daily_upper']:.2f}]"
+                all_ems = get_all_expected_moves(force=True)
+                em_lines = []
+                for sym, em in all_ems.items():
+                    pair = get_leveraged_pair(sym)
+                    bull = pair["bull"]; bear = pair["bear"]
+                    em_lines.append(
+                        f"{sym}: daily ±${em['daily_em']:.2f} ({em['daily_em_pct']:.1f}%) "
+                        f"[${em['daily_lower']:.2f}–${em['daily_upper']:.2f}] | "
+                        f"{bull}/{bear} ±${em['exec_daily_em']:.2f} "
+                        f"[${em['exec_daily_lower']:.2f}–${em['exec_daily_upper']:.2f}]"
                     )
-                    self.log_message(f"[{label}] QQQ EM: daily ±${em['daily_em']:.2f} "
-                                     f"[${em['daily_lower']:.2f}–${em['daily_upper']:.2f}] | "
-                                     f"weekly ±${em['weekly_em']:.2f}")
+                if em_lines:
+                    em_text = "\n" + "\n".join(em_lines)
+                    for line in em_lines:
+                        self.log_message(f"[{label}] EM: {line}")
             except Exception as e:
                 self.log_message(f"[{label}] EM fetch failed: {e}")
 
         self.log_message(summary)
-        self._notify(f"Trade-Bot: [{label}] EOD Signals", summary + em_text)
+        # EOD signal emails suppressed — swing_signal_engine sends a richer
+        # EOD report at 4:15 PM covering QQQ and all retirement accounts.
+        # Trading bot only notifies on actual trades (entry + exit).
+        # To re-enable: uncomment the line below.
+        # self._notify(f"Trade-Bot: [{label}] EOD Signals", summary + em_text)
 
     def _run_eod_signals_backtest(self, label: str):
         all_symbols   = self._load_symbols()
@@ -1298,20 +1326,28 @@ class TrendFilteredORB(Strategy):
             return None
 
         # Earnings filter
-        try:
-            from strategies.earnings_filter import is_earnings_safe, get_earnings_info
-            if not is_earnings_safe(symbol):
-                info = get_earnings_info(symbol)
-                self.log_message(f"SKIP {symbol} — earnings in {info.get('hours_until','?')}h")
-                return None
-        except Exception:
-            pass
+        # ETFs never have earnings — skip the check entirely
+        # QQQ and SMH are ETFs; earnings filter only applies to individual stocks
+        ETF_SYMBOLS = {"QQQ", "SMH", "SPY", "IWM", "DIA", "XLK", "XLF",
+                       "TQQQ", "SQQQ", "SOXL", "SOXS"}
+        if symbol.upper() not in ETF_SYMBOLS:
+            try:
+                from strategies.earnings_filter import is_earnings_safe, get_earnings_info
+                if not is_earnings_safe(symbol):
+                    info = get_earnings_info(symbol)
+                    self.log_message(f"SKIP {symbol} — earnings in {info.get('hours_until','?')}h")
+                    return None
+            except Exception:
+                pass
 
         if symbol not in self._orb_state:
             self._orb_state[symbol] = {
                 "or_high": None, "or_low": None, "or_mid": None,
                 "or_established": False, "trade_taken": False,
             }
+        # Block re-entry: symbol already traded today (any reason)
+        if symbol in self._traded_today:
+            return None
         state = self._orb_state[symbol]
         if state["trade_taken"]:
             return None
@@ -1481,13 +1517,12 @@ class TrendFilteredORB(Strategy):
             return None
 
         # ── EM stop floor: widen stop if it's inside expected-move noise ──────
-        # If OR-low stop < 1/3 of daily EM, the stop will be triggered by
-        # normal intraday noise rather than a real reversal. Widen to EM/3.
-        if _EM_AVAILABLE:
+        # Skipped in backtest: today's options prices don't apply to historical dates.
+        if _EM_AVAILABLE and os.getenv("LUMIBOT_BACKTEST_MODE","").lower() != "true":
             try:
-                em = get_qqq_expected_move()
+                em = get_expected_move(symbol)   # QQQ or SMH
                 if em:
-                    # EM in exec_ticker space: QQQ daily EM × leverage
+                    # EM in exec_ticker space: signal EM × leverage
                     em_floor_dist = (em["daily_em"] * lev_mult) / 3.0
                     if exec_risk_dist < em_floor_dist:
                         self.log_message(
@@ -1503,9 +1538,18 @@ class TrendFilteredORB(Strategy):
         initial_stop   = exec_current - exec_risk_dist
         initial_target = exec_current + exec_risk_dist * self.parameters["reward_ratio"] * target_adj
 
-        qty           = int((self.portfolio_value * effective_risk) / exec_risk_dist)
-        max_pos_value = self.portfolio_value * self.parameters.get("max_position_pct", 0.15)
-        qty           = min(qty, int(max_pos_value / max(exec_current, 0.01)))
+        # Sizing: conviction-weighted capital allocation.
+        # allocated_capital is set by _allocate_capital() in the calling loop
+        # and injected into the candidate dict before _execute_candidate runs.
+        # Here we use the full max_position_pct pool as default; it will be
+        # overridden by the actual conviction-weighted allocation at execution time.
+        allocated_capital = self.portfolio_value * self.parameters.get("max_position_pct", 1.0)
+        risk_dollars  = self.portfolio_value * effective_risk
+        qty_from_val  = int(allocated_capital / max(exec_current, 0.01))
+        qty_from_risk = int(risk_dollars / exec_risk_dist) if exec_risk_dist > 0 else qty_from_val
+        qty           = min(qty_from_val, qty_from_risk)
+        if qty < 1 and qty_from_val >= 1:
+            qty = qty_from_val   # use value-based qty if risk calc gives 0
 
         if qty < 1:
             return None
@@ -1556,6 +1600,40 @@ class TrendFilteredORB(Strategy):
             "state": state, "direct": direct, "df_today": df_today,
         }
 
+    def _allocate_capital(self, candidates: list) -> dict:
+        """
+        Allocate portfolio capital across candidates proportional to conviction.
+
+        Single symbol:  full max_position_pct pool goes to that symbol.
+        Multiple symbols: pool split by conviction weight.
+
+          total_pool = portfolio_value × max_position_pct
+          symbol_allocation = total_pool × (symbol_cv / sum_all_cv)
+
+        Example — $2k account, max_position_pct=1.0, QQQ cv=83, SMH cv=52:
+          total_pool = $2,000
+          QQQ weight = 83/(83+52) = 61.5% → $1,230
+          SMH weight = 52/(83+52) = 38.5% → $  770
+        """
+        total_pool = self.portfolio_value * self.parameters.get("max_position_pct", 1.0)
+        if not candidates:
+            return {}
+        if len(candidates) == 1:
+            return {candidates[0]["symbol"]: total_pool}
+
+        total_cv   = sum(max(c.get("conviction", 50), 1) for c in candidates)
+        allocation = {}
+        for c in candidates:
+            cv     = max(c.get("conviction", 50), 1)
+            weight = cv / total_cv
+            alloc  = round(total_pool * weight, 2)
+            allocation[c["symbol"]] = alloc
+            self.log_message(
+                f"  Allocation: {c['symbol']} cv={cv:.0f} → "
+                f"{weight:.0%} = ${alloc:,.0f}"
+            )
+        return allocation
+
     def _execute_candidate(self, c: dict):
         symbol       = c["symbol"]
         exec_ticker  = c["exec_ticker"]
@@ -1570,6 +1648,23 @@ class TrendFilteredORB(Strategy):
         action       = c["action"]
         state        = c["state"]
         direct       = c["direct"]
+
+        # Recalculate qty using conviction-weighted allocated_capital
+        # (set by _allocate_capital before this call, may differ from _process_symbol estimate)
+        allocated_capital = c.get("allocated_capital",
+            self.portfolio_value * self.parameters.get("max_position_pct", 1.0))
+        risk_dollars  = self.portfolio_value * c.get("effective_risk", self.parameters["risk_pct"])
+        stop_dist     = abs(exec_current - c["initial_stop"])
+        if stop_dist > 0 and exec_current > 0:
+            qty_from_val  = int(allocated_capital / exec_current)
+            qty_from_risk = int(risk_dollars / stop_dist)
+            qty           = min(qty_from_val, qty_from_risk)
+            if qty < 1 and qty_from_val >= 1:
+                qty = qty_from_val
+            if qty < 1:
+                self.log_message(f"SKIP {exec_ticker} — qty=0 after allocation recalc "
+                                 f"(alloc=${allocated_capital:.0f}, stop_dist=${stop_dist:.2f})")
+                return
 
         # Always BUY — never short-sell
         try:
@@ -1608,6 +1703,7 @@ class TrendFilteredORB(Strategy):
             open_positions=len(self._positions),
         )
 
+        self._traded_today.add(symbol)   # block re-entry this session
         self._positions[exec_ticker] = {
             "symbol": symbol, "signal_symbol": symbol,
             "exec_ticker": exec_ticker, "is_inverse": is_inverse,
@@ -1627,11 +1723,11 @@ class TrendFilteredORB(Strategy):
         o_tag     = " [OVERNIGHT]" if overnight_eligible else " [EOD]"
         inv_tag   = " → buying inverse ETF" if is_inverse else ""
 
-        # EM context — validate stop/target against QQQ daily expected move
+        # EM context — validate stop/target against signal symbol expected move
         em_note = ""
-        if _EM_AVAILABLE:
+        if _EM_AVAILABLE and os.getenv("LUMIBOT_BACKTEST_MODE","").lower() != "true":
             try:
-                em = get_qqq_expected_move()
+                em = get_expected_move(symbol)   # QQQ or SMH
                 if em:
                     ctx = em_context_for_trade(
                         em, exec_current,
@@ -1671,9 +1767,9 @@ class TrendFilteredORB(Strategy):
         except Exception: pass
 
     def _load_symbols(self) -> list:
-        # Trading bot always trades QQQ only (→ TQQQ bull / SQQQ bear).
-        # No symbols.txt needed.
-        return [SIGNAL_SYMBOL]
+        # Returns all signal symbols from the leverage map.
+        # Add new symbols by updating leverage_map.py — no other change needed.
+        return list(SIGNAL_SYMBOLS)
 
     def _bias_path(self) -> str:
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":

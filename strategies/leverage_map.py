@@ -1,17 +1,20 @@
 """
 leverage_map.py — Signal symbol to leveraged ETF pair mapping
 ──────────────────────────────────────────────────────────────
-Trading bot trades QQQ only:
-  BUY signal  → BUY TQQQ (ProShares UltraPro QQQ 3×)
-  SELL signal → BUY SQQQ (ProShares UltraPro Short QQQ 3×)
+Trading bot signal symbols and their 3× leveraged execution ETFs:
+
+  QQQ  → TQQQ (bull) / SQQQ (bear)   Nasdaq-100 3×
+  SMH  → SOXL (bull) / SOXS (bear)   Semiconductor 3×
 
 Structure:
     LEVERAGE_MAP[signal_symbol] = {
-        "bull":     str,   # buy on BUY signal
-        "bear":     str,   # buy on SELL signal
+        "bull":     str,   # ETF to buy on BUY signal
+        "bear":     str,   # ETF to buy on SELL signal
         "leverage": int,   # leverage multiple
         "note":     str,
     }
+
+To add a new symbol: add an entry to LEVERAGE_MAP below.
 """
 
 LEVERAGE_MAP = {
@@ -19,7 +22,13 @@ LEVERAGE_MAP = {
         "bull":     "TQQQ",
         "bear":     "SQQQ",
         "leverage": 3,
-        "note":     "Nasdaq-100 3x — ProShares UltraPro QQQ / Short QQQ",
+        "note":     "Nasdaq-100 3× — ProShares UltraPro QQQ / Short QQQ",
+    },
+    "SMH": {
+        "bull":     "SOXL",
+        "bear":     "SOXS",
+        "leverage": 3,
+        "note":     "Semiconductor 3× — Direxion Daily Semiconductor Bull/Bear 3×",
     },
 }
 
@@ -27,13 +36,11 @@ LEVERAGE_MAP = {
 def get_leveraged_pair(signal_symbol: str) -> dict:
     """
     Return the leveraged ETF pair for a signal symbol.
-    Always returns QQQ → TQQQ/SQQQ since that is the only traded symbol.
-    Falls back to trading the underlying directly if symbol not in map.
+    Falls back to trading the underlying directly if not in map.
     """
     entry = LEVERAGE_MAP.get(signal_symbol.upper())
     if entry:
         return entry
-    # Fallback — trade underlying directly (should never fire for QQQ-only bot)
     return {
         "bull":     signal_symbol,
         "bear":     signal_symbol,
@@ -43,9 +50,20 @@ def get_leveraged_pair(signal_symbol: str) -> dict:
 
 
 def is_direct_trade(symbol: str) -> bool:
-    """
-    Returns True if bull == bear (no leveraged pair, trade direct).
-    For QQQ this is always False (TQQQ ≠ SQQQ).
-    """
+    """Returns True if no leveraged pair exists (bull == bear)."""
     entry = get_leveraged_pair(symbol)
     return entry["bull"] == entry["bear"]
+
+
+def get_all_signal_symbols() -> list[str]:
+    """All signal symbols the bot tracks."""
+    return list(LEVERAGE_MAP.keys())
+
+
+def get_all_exec_tickers() -> set[str]:
+    """All execution tickers (TQQQ, SQQQ, SOXL, SOXS) — used for EOD forced close."""
+    tickers = set()
+    for pair in LEVERAGE_MAP.values():
+        tickers.add(pair["bull"])
+        tickers.add(pair["bear"])
+    return tickers

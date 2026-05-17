@@ -69,12 +69,12 @@ def main():
         "bar_minutes":        5,
         "risk_pct":           0.02,    # 2% risk = $40 on $2k account
         "reward_ratio":       2.0,     # 2:1 reference (~$80 target)
-        "eod_exit_time":      "15:45",
+        "eod_exit_time":      "15:56",   # 3:56 PM — maximize gains
 
         # ── Position limits ($2k cash account) ───────────────────────────
         # 1 position max (QQQ only). PDT rule does not apply (cash account).
         # T+1 settlement: fine for 1 trade per day.
-        "max_positions":      1,
+        "max_positions":      2,    # 1 per symbol: QQQ and SMH
         "max_position_pct":   0.40,    # 40% = ~$800 (~24 TQQQ shares at $33)
 
         # ── Size guards ───────────────────────────────────────────────────

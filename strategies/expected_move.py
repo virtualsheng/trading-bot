@@ -1,32 +1,30 @@
 """
-expected_move.py — QQQ options-implied expected move
-──────────────────────────────────────────────────────
+expected_move.py — Options-implied expected move for signal symbols
+────────────────────────────────────────────────────────────────────
 Calculates the market's own expected daily and weekly price range
-for QQQ using the ATM straddle price from the options chain.
+for QQQ and SMH using the ATM straddle price from the options chain.
 
 Formula:
     Expected Move = ATM Straddle × 0.68
     ATM Straddle  = ATM call mid-price + ATM put mid-price
     × 0.68 converts 1 standard deviation to the ~68% probability range
 
-Since the bot executes on TQQQ/SQQQ (3× leverage):
-    TQQQ/SQQQ expected move ≈ QQQ expected move × 3
+Execution ETF EM = Signal symbol EM × leverage multiple (3×):
+    QQQ EM × 3 → TQQQ/SQQQ expected move
+    SMH EM × 3 → SOXL/SOXS expected move
 
 Used by the strategy to:
   - Validate stop distance (stop < 1/3 of daily EM = inside noise)
   - Log target vs EM boundary context
-  - EOD signal report: show QQQ expected range for next session
+  - EOD signal report: show expected range for each signal symbol
 
 Free — yfinance options chain, no API key required.
-Cached for the session to avoid repeated fetches.
+Cached per symbol per session.
 
 Usage:
-    from strategies.expected_move import get_qqq_expected_move
-    em = get_qqq_expected_move()
-    if em:
-        print(f"QQQ daily EM: ±${em['daily_em']:.2f}")
-        print(f"QQQ range: ${em['daily_lower']:.2f} – ${em['daily_upper']:.2f}")
-        print(f"TQQQ/SQQQ EM: ±${em['tqqq_daily_em']:.2f}")
+    from strategies.expected_move import get_expected_move, get_all_expected_moves
+    em = get_expected_move("QQQ")
+    ems = get_all_expected_moves()   # {symbol: em_dict}
 """
 
 import json
@@ -36,12 +34,18 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# Simple in-memory cache — refreshed once per session
-_cache: dict = {}
+# Per-symbol in-memory cache — refreshed once per session
+_cache: dict = {}          # {symbol: result_dict}
 _cache_date: str = ""
 
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "..", "cache", "expected_move_cache.json")
+
+# Signal symbols → execution tickers for EM calculation
+SIGNAL_TO_EXEC = {
+    "QQQ": {"bull": "TQQQ", "bear": "SQQQ", "leverage": 3},
+    "SMH": {"bull": "SOXL", "bear": "SOXS", "leverage": 3},
+}
 
 
 def _load_disk_cache() -> dict:
@@ -132,97 +136,82 @@ def _calc_straddle_em(ticker_obj, expiry: str, price: float) -> dict | None:
         return None
 
 
-def get_qqq_expected_move(force: bool = False) -> dict | None:
+def get_expected_move(signal_symbol: str = "QQQ", force: bool = False) -> dict | None:
     """
-    Fetch QQQ options-implied expected move for today and this week.
-    Cached once per day to disk — fast on repeated calls.
+    Fetch options-implied expected move for a signal symbol (QQQ or SMH).
+    Cached per symbol per day.
 
-    Returns:
-    {
-        "symbol":           "QQQ",
-        "price":            float,
-        "date":             str,          # today YYYY-MM-DD
-
-        # Daily (nearest expiry)
-        "daily_expiry":     str,
-        "daily_em":         float,        # ±$ 1-SD expected move
-        "daily_em_pct":     float,        # ±%
-        "daily_upper":      float,
-        "daily_lower":      float,
-        "daily_straddle":   float,
-        "daily_atm_iv":     float,
-
-        # Weekly (next Friday)
-        "weekly_expiry":    str,
-        "weekly_em":        float,
-        "weekly_em_pct":    float,
-        "weekly_upper":     float,
-        "weekly_lower":     float,
-
-        # TQQQ/SQQQ equivalents (QQQ × 3)
-        "tqqq_daily_em":    float,
-        "tqqq_daily_upper": float,
-        "tqqq_daily_lower": float,
-        "tqqq_price_est":   float,        # estimated TQQQ price (QQQ/5 rough estimate)
-    }
+    Returns dict with daily_em, weekly_em, exec_ticker EM values, etc.
+    exec_ticker keys use the bull ticker name (tqqq_* for QQQ, soxl_* for SMH).
     """
     global _cache, _cache_date
 
+    sym   = signal_symbol.upper()
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Return in-memory cache if same day
-    if not force and _cache and _cache_date == today:
-        return _cache
+    # Reset cache on new day
+    if _cache_date != today:
+        _cache      = {}
+        _cache_date = today
+
+    # Return in-memory cache
+    if not force and sym in _cache:
+        return _cache[sym]
 
     # Try disk cache
     if not force:
         disk = _load_disk_cache()
-        if disk:
-            _cache      = disk
-            _cache_date = today
-            return disk
+        if disk.get("date") == today and sym in disk.get("symbols", {}):
+            result = disk["symbols"][sym]
+            _cache[sym] = result
+            return result
+
+    pair = SIGNAL_TO_EXEC.get(sym)
+    if not pair:
+        logger.warning(f"No exec pair configured for {sym}")
+        return None
+
+    bull_ticker = pair["bull"]
+    lev_mult    = pair["leverage"]
+    exec_key    = bull_ticker.lower()   # e.g. "tqqq" or "soxl"
 
     try:
         import yfinance as yf
 
-        qqq    = yf.Ticker("QQQ")
-        hist   = qqq.history(period="2d", interval="1d")
+        ticker = yf.Ticker(sym)
+        hist   = ticker.history(period="2d", interval="1d")
         if hist is None or hist.empty:
-            logger.warning("QQQ history unavailable")
+            logger.warning(f"{sym} history unavailable")
             return None
-        price  = float(hist["Close"].iloc[-1])
+        price = float(hist["Close"].iloc[-1])
 
-        expirations = qqq.options
+        expirations = ticker.options
         if not expirations:
-            logger.warning("QQQ options unavailable")
+            logger.warning(f"{sym} options unavailable")
             return None
 
-        # Nearest expiry for daily EM
-        nearest = expirations[0]
-
-        # Next Friday for weekly EM
-        next_fri   = _next_friday()
+        nearest  = expirations[0]
+        next_fri = _next_friday()
         weekly_exp = next((e for e in expirations if e >= next_fri), nearest)
 
-        daily  = _calc_straddle_em(qqq, nearest,   price)
-        weekly = _calc_straddle_em(qqq, weekly_exp, price) if weekly_exp != nearest else daily
+        daily  = _calc_straddle_em(ticker, nearest,    price)
+        weekly = _calc_straddle_em(ticker, weekly_exp, price) if weekly_exp != nearest else daily
 
         if not daily:
-            logger.warning("QQQ ATM straddle calculation failed")
+            logger.warning(f"{sym} ATM straddle calculation failed")
             return None
 
-        # TQQQ/SQQQ: 3× leverage means 3× the expected move in $ terms
-        # We estimate TQQQ price as roughly QQQ/5 (approximate, varies)
-        tqqq_hist  = yf.Ticker("TQQQ").history(period="2d", interval="1d")
-        tqqq_price = float(tqqq_hist["Close"].iloc[-1]) if tqqq_hist is not None and not tqqq_hist.empty else price / 5
+        # Fetch exec ticker price for real dollar amounts
+        exec_hist  = yf.Ticker(bull_ticker).history(period="2d", interval="1d")
+        exec_price = float(exec_hist["Close"].iloc[-1]) if exec_hist is not None and not exec_hist.empty else price / 5
 
-        tqqq_daily_em    = round(daily["em"] * 3, 2)
-        tqqq_daily_pct   = round(tqqq_daily_em / tqqq_price * 100, 2) if tqqq_price > 0 else daily["em_pct"] * 3
-        tqqq_daily_upper = round(tqqq_price + tqqq_daily_em, 2)
-        tqqq_daily_lower = round(tqqq_price - tqqq_daily_em, 2)
+        exec_daily_em    = round(daily["em"] * lev_mult, 2)
+        exec_daily_pct   = round(exec_daily_em / exec_price * 100, 2) if exec_price > 0 else daily["em_pct"] * lev_mult
+        exec_daily_upper = round(exec_price + exec_daily_em, 2)
+        exec_daily_lower = round(exec_price - exec_daily_em, 2)
 
         result = {
-            "symbol":           "QQQ",
+            "symbol":           sym,
             "price":            round(price, 2),
             "date":             today,
 
@@ -234,40 +223,69 @@ def get_qqq_expected_move(force: bool = False) -> dict | None:
             "daily_straddle":   daily["straddle"],
             "daily_atm_iv":     daily["atm_iv"],
 
-            "weekly_expiry":    weekly["expiry"] if weekly else daily["expiry"],
-            "weekly_em":        weekly["em"]     if weekly else daily["em"],
-            "weekly_em_pct":    weekly["em_pct"] if weekly else daily["em_pct"],
-            "weekly_upper":     weekly["upper"]  if weekly else daily["upper"],
-            "weekly_lower":     weekly["lower"]  if weekly else daily["lower"],
+            "weekly_expiry":    weekly["expiry"]  if weekly else daily["expiry"],
+            "weekly_em":        weekly["em"]      if weekly else daily["em"],
+            "weekly_em_pct":    weekly["em_pct"]  if weekly else daily["em_pct"],
+            "weekly_upper":     weekly["upper"]   if weekly else daily["upper"],
+            "weekly_lower":     weekly["lower"]   if weekly else daily["lower"],
 
-            "tqqq_price":       round(tqqq_price, 2),
-            "tqqq_daily_em":    tqqq_daily_em,
-            "tqqq_daily_pct":   tqqq_daily_pct,
-            "tqqq_daily_upper": tqqq_daily_upper,
-            "tqqq_daily_lower": tqqq_daily_lower,
+            # Execution ticker fields (generic keys + symbol-specific)
+            "exec_ticker":       bull_ticker,
+            "exec_price":        round(exec_price, 2),
+            "exec_daily_em":     exec_daily_em,
+            "exec_daily_pct":    exec_daily_pct,
+            "exec_daily_upper":  exec_daily_upper,
+            "exec_daily_lower":  exec_daily_lower,
+
+            # Legacy QQQ-compatible keys (for backward compat)
+            f"{exec_key}_price":       round(exec_price, 2),
+            f"{exec_key}_daily_em":    exec_daily_em,
+            f"{exec_key}_daily_pct":   exec_daily_pct,
+            f"{exec_key}_daily_upper": exec_daily_upper,
+            f"{exec_key}_daily_lower": exec_daily_lower,
+            # Also keep tqqq_ keys for QQQ backward compat
+            "tqqq_price":        round(exec_price, 2)        if sym == "QQQ" else None,
+            "tqqq_daily_em":     exec_daily_em               if sym == "QQQ" else None,
+            "tqqq_daily_upper":  exec_daily_upper             if sym == "QQQ" else None,
+            "tqqq_daily_lower":  exec_daily_lower             if sym == "QQQ" else None,
         }
 
         logger.info(
-            f"QQQ expected move: "
-            f"daily ±${daily['em']:.2f} ({daily['em_pct']:.1f}%) "
-            f"[{daily['lower']:.2f}–{daily['upper']:.2f}] | "
-            f"weekly ±${result['weekly_em']:.2f} "
-            f"[{result['weekly_lower']:.2f}–{result['weekly_upper']:.2f}]"
-        )
-        logger.info(
-            f"TQQQ implied range: "
-            f"±${tqqq_daily_em:.2f} ({tqqq_daily_pct:.1f}%) "
-            f"[${tqqq_daily_lower:.2f}–${tqqq_daily_upper:.2f}]"
+            f"{sym} EM: daily ±${daily['em']:.2f} ({daily['em_pct']:.1f}%) "
+            f"[${daily['lower']:.2f}–${daily['upper']:.2f}] | "
+            f"{bull_ticker} ±${exec_daily_em:.2f} "
+            f"[${exec_daily_lower:.2f}–${exec_daily_upper:.2f}]"
         )
 
-        _cache      = result
-        _cache_date = today
-        _save_disk_cache(result)
+        _cache[sym] = result
+        # Save to disk cache (all symbols together)
+        disk = _load_disk_cache() or {"date": today, "symbols": {}}
+        disk["date"] = today
+        disk.setdefault("symbols", {})[sym] = result
+        _save_disk_cache(disk)
         return result
 
     except Exception as e:
-        logger.warning(f"QQQ expected move failed: {e}")
+        logger.warning(f"{sym} expected move failed: {e}")
         return None
+
+
+def get_qqq_expected_move(force: bool = False) -> dict | None:
+    """Backward-compatible alias for get_expected_move('QQQ')."""
+    return get_expected_move("QQQ", force=force)
+
+
+def get_all_expected_moves(force: bool = False) -> dict:
+    """
+    Fetch expected moves for all configured signal symbols.
+    Returns {symbol: em_dict}.
+    """
+    results = {}
+    for sym in SIGNAL_TO_EXEC:
+        em = get_expected_move(sym, force=force)
+        if em:
+            results[sym] = em
+    return results
 
 
 def em_context_for_trade(
