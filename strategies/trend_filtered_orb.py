@@ -1,26 +1,26 @@
 """
-TrendFilteredORB Strategy — Full Architecture
-──────────────────────────────────────────────
+TrendFilteredORB Strategy - Full Architecture
+
 Signal flow:
-  EOD Technical Signal → Daily Bias Cache
-  ↓
+  EOD Technical Signal -> Daily Bias Cache
+  
   Morning ORB Breakout (only if aligns with bias)
-  ↓
-  AI Setup Grader (Ollama) → Confidence Score + Size Multiplier
-  ↓
-  Regime Detector (Ollama) → Market Regime + Stop/Target Adjustment
-  ↓
-  Dynamic Position Sizing (risk_pct × size_multiplier)
-  ↓
+  
+  AI Setup Grader (Ollama) -> Confidence Score + Size Multiplier
+  
+  Regime Detector (Ollama) -> Market Regime + Stop/Target Adjustment
+  
+  Dynamic Position Sizing (risk_pct x size_multiplier)
+  
   Alpaca Execution
-  ↓
-  Trade Journal (SQLite) → ML training data
+  
+  Trade Journal (SQLite) -> ML training data
 
 HOLD bias override: if bias=HOLD but a strong ORB signal fires
 and no position exists, the trade is taken at half size.
 
-TrendFilteredORB Strategy — v3
-────────────────────────────────
+TrendFilteredORB Strategy - v3
+
 Key behaviors:
   - Leveraged/inverse ETFs (2x/3x): always closed at EOD
   - Direct-trade symbols (no leverage pair): held overnight,
@@ -32,15 +32,15 @@ Key behaviors:
   - Opposing position guard: won't hold bull+bear of same pair simultaneously
   - Direct-trade SHORT guard: skips SHORT if no inverse ETF exists
 
-TrendFilteredORB Strategy — v4
-────────────────────────────────
+TrendFilteredORB Strategy - v4
+
 Changes in v4:
   + Earnings calendar filter (skip entries within 48h of earnings)
   + Regime-based strategy switching:
-      - trending_up / trending_down → ORB momentum entries (normal)
-      - ranging / mean_reversion    → mean-reversion fade entries
-      - volatile                    → ORB only with tighter sizing
-      - low_liquidity               → skip entirely
+      - trending_up / trending_down -> ORB momentum entries (normal)
+      - ranging / mean_reversion    -> mean-reversion fade entries
+      - volatile                    -> ORB only with tighter sizing
+      - low_liquidity               -> skip entirely
   + Ollama warmup in before_market_opens()
   + run_technical_signals double-call bug fixed (single pass, cached results)
   + hold_override explicitly passed from launcher
@@ -49,54 +49,54 @@ Key behaviors unchanged from v3:
   - Leveraged/inverse ETFs closed at EOD
   - Direct-trade symbols held overnight, closed on SELL signal
   - Broker position sync at market open
-  - ORB fires once per symbol between 9:45–noon
+  - ORB fires once per symbol between 9:45-noon
   - Stop/target monitored every 5-min
   - AI setup grading + dynamic sizing
   - Trade journal (SQLite)
 
-TrendFilteredORB Strategy — v5
-────────────────────────────────
+TrendFilteredORB Strategy - v5
+
 Changes in v5:
   + SELL signal at 3:50 PM immediately closes overnight positions
     (previously signals were updated but sells only checked next morning)
   + Second true EOD analysis at 4:15 PM using official closing prices
     overwrites the 3:50 PM preliminary bias cache with final close data
     and immediately acts on any new SELL signals from the final run
-  + Market hours guard — iteration exits immediately outside
-    Mon–Fri 9:30 AM – 4:25 PM ET, eliminating off-hours noise
+  + Market hours guard - iteration exits immediately outside
+    Mon-Fri 9:30 AM - 4:25 PM ET, eliminating off-hours noise
   + Ollama warmup moved to initialize() so model loads at script start
     not at market open
 
-TrendFilteredORB Strategy — v6
-────────────────────────────────
+TrendFilteredORB Strategy - v6
+
 Changes in v6:
-  + Swing mode removed — moved to standalone swing_signal_engine/
+  + Swing mode removed - moved to standalone swing_signal_engine/
   + Bot now QQQ-only: signal on QQQ, execute on TQQQ (bull) or SQQQ (bear)
-  + SIGNAL_SYMBOL = "QQQ" hardcoded — always trades QQQ → TQQQ/SQQQ
+  + SIGNAL_SYMBOL = "QQQ" hardcoded - always trades QQQ -> TQQQ/SQQQ
   + start_bot.bat runs single instance only
 
 Key behaviors from v3/v4/v5 unchanged:
   - TQQQ/SQQQ always closed at EOD (3:45 PM)
   - Direct-trade symbols held overnight, closed on SELL signal
   - Broker position sync at 9:30 AM market open
-  - ORB entries once per symbol 9:45 AM – noon
+  - ORB entries once per symbol 9:45 AM - noon
   - Stop/target monitored every 5-min during market hours
   - Earnings filter (48h buffer before report)
   - Regime-based strategy switching (ORB vs mean-reversion)
   - AI setup grading + dynamic sizing
   - Trade journal (SQLite)
 
-TrendFilteredORB Strategy — v7
-────────────────────────────────
+TrendFilteredORB Strategy - v7
+
 Changes in v7 (bug fixes from live trading session 2026-05-14):
 
   BREAKOUT FILTER (critical fix):
     ALL entries (BUY and HOLD) now require price to meaningfully clear the
-    OR boundary: current > or_high × (1 + min_breakout_pct) for LONG entries.
+    OR boundary: current > or_high x (1 + min_breakout_pct) for LONG entries.
     Symbols showing "WAIT / Inside Range" in the ORB alert are now skipped.
 
   POSITION SIZING GUARDS (critical fix):
-    1. min_stop_pct (default 0.5%): floor on risk_dist — prevents absurdly
+    1. min_stop_pct (default 0.5%): floor on risk_dist - prevents absurdly
        large share counts when the OR is very tight.
     2. max_position_pct (default 15%): hard cap on position value regardless
        of qty calculation.
@@ -114,14 +114,14 @@ Changes in v7 (bug fixes from live trading session 2026-05-14):
 
   DUPLICATE LOG FIX:
     run_live_combined.py now only adds a FileHandler to the root logger.
-    LumiBot's own StreamHandler handles console output — adding a second
+    LumiBot's own StreamHandler handles console output - adding a second
     one caused every line to print twice.
 
-Key behaviors from v3–v6 unchanged:
+Key behaviors from v3-v6 unchanged:
   - Leveraged/inverse ETFs closed at EOD
   - Direct-trade symbols held overnight, closed on SELL signal
   - Broker position sync at 9:30 AM market open
-  - ORB entries once per symbol 9:45 AM – noon
+  - ORB entries once per symbol 9:45 AM - noon
   - Stop/target monitored every 5-min during market hours
   - Earnings filter (48h buffer before report)
   - Regime-based strategy switching (ORB vs mean-reversion)
@@ -129,45 +129,45 @@ Key behaviors from v3–v6 unchanged:
   - Trade journal (SQLite)
   - Swing mode (v6)
 
-TrendFilteredORB Strategy — v8
-────────────────────────────────
+TrendFilteredORB Strategy - v8
+
 All fixes combined:
 
   v7 fixes:
-    - Breakout filter: require price > or_high × (1 + min_breakout_pct) before entry
-    - Sizing guard 1: min_stop_pct (0.5%) — prevents huge qty on tight ORs
-    - Sizing guard 2: max_position_pct (15%) — hard cap per position
+    - Breakout filter: require price > or_high x (1 + min_breakout_pct) before entry
+    - Sizing guard 1: min_stop_pct (0.5%) - prevents huge qty on tight ORs
+    - Sizing guard 2: max_position_pct (15%) - hard cap per position
     - direction variable bug fixed (UFO/GDE errors eliminated)
     - Regime prompt reduced: fetch 10/10/5 bars, fmt_bars uses [-5:]
     - Duplicate log fixed: run_live_combined adds FileHandler only
 
   v8 fixes:
-    - FINAL signals moved to after_market_closes() — LumiBot blocks
+    - FINAL signals moved to after_market_closes() - LumiBot blocks
       on_trading_iteration() after ~4:03 PM so the 4:15 PM block never fired
     - Earnings filter: "No earnings dates found" logged at DEBUG not ERROR
-      (ETFs don't have earnings — this was noisy, not an error)
+      (ETFs don't have earnings - this was noisy, not an error)
     - trigger_sentiment_async() now receives bias dict so STA only
       processes BUY/STRONG_BUY symbols + SPY/QQQ instead of all 40
 
-TrendFilteredORB Strategy — v9
-────────────────────────────────
+TrendFilteredORB Strategy - v9
+
 CRITICAL FIX in v9: Order direction and trade model completely corrected.
 
-  All orders now submit as "buy" — the strategy never short-sells.
+  All orders now submit as "buy" - the strategy never short-sells.
   Trade model:
-    BUY/STRONG_BUY signal  → BUY bull leveraged ETF (e.g. QQQ→TQQQ)
-    SELL/STRONG_SELL signal → BUY inverse ETF       (e.g. QQQ→SQQQ)
-    SELL signal + no inverse ETF → skip entirely    (e.g. RKLB, URA)
-    HOLD signal → BUY bull ETF only on upside breakout, at 0.5× size
+    BUY/STRONG_BUY signal  -> BUY bull leveraged ETF (e.g. QQQ->TQQQ)
+    SELL/STRONG_SELL signal -> BUY inverse ETF       (e.g. QQQ->SQQQ)
+    SELL signal + no inverse ETF -> skip entirely    (e.g. RKLB, URA)
+    HOLD signal -> BUY bull ETF only on upside breakout, at 0.5x size
 
   BUGS FIXED in v9 vs v8:
-    1. HOLD bias was opening SHORT trades via is_short_break path → removed
-    2. direction="SHORT" submitted "sell" orders → ALL orders now submit "buy"
-    3. Stop/target were inverted for inverse ETF trades → fixed, always same formula
-    4. Direct-trade symbols (no inverse) were being short-sold → blocked
-    5. Candidates were ranked before direction was confirmed → ranking now only
+    1. HOLD bias was opening SHORT trades via is_short_break path -> removed
+    2. direction="SHORT" submitted "sell" orders -> ALL orders now submit "buy"
+    3. Stop/target were inverted for inverse ETF trades -> fixed, always same formula
+    4. Direct-trade symbols (no inverse) were being short-sold -> blocked
+    5. Candidates were ranked before direction was confirmed -> ranking now only
        includes valid confirmed setups
-    6. Immediate TARGET/STOP hits after bad orders → fixed by correct price math
+    6. Immediate TARGET/STOP hits after bad orders -> fixed by correct price math
 
   All v7/v8 fixes retained:
     - Breakout filter (min_breakout_pct)
@@ -178,31 +178,31 @@ CRITICAL FIX in v9: Order direction and trade model completely corrected.
     - Earnings filter at DEBUG level
 
   v9 changes:
-    - Dynamic sleeptime: 2M during ORB window (9:45 AM–noon), 5M otherwise
+    - Dynamic sleeptime: 2M during ORB window (9:45 AM-noon), 5M otherwise
     - after_market_closes() waits after_close_delay_minutes (default 5)
-      before running FINAL signals — gives closing prices time to settle
+      before running FINAL signals - gives closing prices time to settle
     - CRITICAL: All order direction bugs fixed:
-        * Always submit BUY orders — never short-sell
-        * SELL signal → BUY inverse ETF (is_inverse=True)
-        * SELL signal + no inverse ETF → skip
-        * HOLD signal → upside breakout only, never bearish
+        * Always submit BUY orders - never short-sell
+        * SELL signal -> BUY inverse ETF (is_inverse=True)
+        * SELL signal + no inverse ETF -> skip
+        * HOLD signal -> upside breakout only, never bearish
         * Stop/target always: stop below entry, target above entry
 
-TrendFilteredORB Strategy — v17
-────────────────────────────────
-NEW: Trail-only exit — no hard target close. Unified $2k ORB account support.
+TrendFilteredORB Strategy - v17
+
+NEW: Trail-only exit - no hard target close. Unified $2k ORB account support.
 
   TARGET EXIT REMOVED (target_exit=False by default):
     The initial target is still calculated and logged as a reference milestone,
     but reaching it no longer triggers a position close. Instead:
-      • The trailing stop (trail_stop_pct=0.02) does all the work
-      • EOD close at 3:45 PM is the primary forced exit for leveraged ETFs
+      * The trailing stop (trail_stop_pct=0.02) does all the work
+      * EOD close at 3:45 PM is the primary forced exit for leveraged ETFs
     This captures the full move on the ~60% of trending days where price
     continues into the close, instead of being capped at the first target.
 
   TRAILING STOP SET TO 2.0% (default):
-    Previous default was 1.5% — too tight for 3x ETF intrabar noise.
-    Normal TQQQ/SQQQ bar-to-bar fluctuation is 0.9–1.5%, so a 1.5% trail
+    Previous default was 1.5% - too tight for 3x ETF intrabar noise.
+    Normal TQQQ/SQQQ bar-to-bar fluctuation is 0.9-1.5%, so a 1.5% trail
     would frequently get knocked out by noise rather than genuine reversal.
     2.0% sits just above the noise floor while still catching real reversals.
 
@@ -214,7 +214,7 @@ NEW: Trail-only exit — no hard target close. Unified $2k ORB account support.
     "trail_stop_pct": 0.02    # 2% trail (was 1.5%)
 
   Milestone log when target is passed (target_exit=False):
-    "TARGET PASSED TQQQ @ 34.56 | unrealised PnL: +$54.24 | trail=2.0% — letting it ride"
+    "TARGET PASSED TQQQ @ 34.56 | unrealised PnL: +$54.24 | trail=2.0% - letting it ride"
 
 All v16 fixes retained:
   - Stop arm-into-loss detection
@@ -223,11 +223,11 @@ All v16 fixes retained:
 All v15 fixes retained:
   - OR-low stop placement + 15-min stop activation delay
 
-All v14–v10 fixes retained (scale-out legacy, leverage scaling,
+All v14-v10 fixes retained (scale-out legacy, leverage scaling,
   re-entry block, exec price space, backtest sleep guard)
 
-TrendFilteredORB Strategy — v16
-────────────────────────────────
+TrendFilteredORB Strategy - v16
+
 FIX: Stop arm-into-loss detection + separated live vs backtest defaults.
 
   STOP ARM-INTO-LOSS FIX:
@@ -245,7 +245,7 @@ FIX: Stop arm-into-loss detection + separated live vs backtest defaults.
     The backtest runner (run_backtest_combined.py) overrides these with
     conservative values suited for a 3-ticker validation run:
       max_positions   = 3    (only QQQ/TQQQ/SQQQ in backtest)
-      max_position_pct = 0.05 (5% cap — avoids over-sizing on tight ORs)
+      max_position_pct = 0.05 (5% cap - avoids over-sizing on tight ORs)
 
 All v15 fixes retained:
   - OR-low stop placement (stop_mode="or_low")
@@ -254,26 +254,26 @@ All v15 fixes retained:
 All v14 fixes retained:
   - Scale-out at target + trailing stop on remainder
 
-All v13–v10 fixes retained (leverage scaling, re-entry block,
+All v13-v10 fixes retained (leverage scaling, re-entry block,
   exec price space, backtest sleep guard)
 
-TrendFilteredORB Strategy — v15
-────────────────────────────────
+TrendFilteredORB Strategy - v15
+
 NEW: OR-low stop placement + stop activation delay.
 
-  STOP PLACEMENT — stop_mode parameter (default: "or_low"):
-    "or_low"    — Stop anchored at the Opening Range low, converted to
+  STOP PLACEMENT - stop_mode parameter (default: "or_low"):
+    "or_low"    - Stop anchored at the Opening Range low, converted to
                   exec_ticker price space via the same % relationship used
                   for entry. This is the textbook ORB stop: a valid breakout
-                  above OR high should NEVER revisit OR low — if it does,
+                  above OR high should NEVER revisit OR low - if it does,
                   the breakout thesis is invalidated and you exit.
                   On TQQQ/SQQQ this gives a much wider, more meaningful stop
-                  than the old or_mid approach (e.g. OR = 490–494 on QQQ →
-                  stop anchored at 490 instead of 492, ≈0.8% vs 0.4%).
-    "or_mid"    — Legacy v14: stop at OR midpoint (tighter, more stop-outs).
-    "fixed_pct" — Simple min_stop_pct below exec entry price.
+                  than the old or_mid approach (e.g. OR = 490-494 on QQQ ->
+                  stop anchored at 490 instead of 492, ~0.8% vs 0.4%).
+    "or_mid"    - Legacy v14: stop at OR midpoint (tighter, more stop-outs).
+    "fixed_pct" - Simple min_stop_pct below exec entry price.
 
-  STOP ACTIVATION DELAY — stop_delay_minutes parameter (default: 15):
+  STOP ACTIVATION DELAY - stop_delay_minutes parameter (default: 15):
     The stop is NOT checked for the first 15 minutes after entry.
     This lets the trade breathe through the common early-session volatility
     and stop-hunt wicks that would otherwise trigger a stop on an otherwise
@@ -283,8 +283,8 @@ NEW: OR-low stop placement + stop activation delay.
   Together these two changes mean:
     - The stop is wider (or_low vs or_mid)
     - AND it doesn't activate until the trade has had time to develop
-    - Worst case: price reverses hard in the first 15 min → stopped at or_low
-    - Best case: price dips early then rallies → stop never triggered, full
+    - Worst case: price reverses hard in the first 15 min -> stopped at or_low
+    - Best case: price dips early then rallies -> stop never triggered, full
       profit available on both halves of the scale-out
 
   New parameters:
@@ -292,8 +292,8 @@ NEW: OR-low stop placement + stop activation delay.
     "stop_delay_minutes": 15         # 0 = immediate (v14 behaviour)
 
   Position dict gains two new keys set at entry:
-    "entry_time"  — datetime of entry (for stop delay calculation)
-    "stop_active" — False during delay window, True once armed
+    "entry_time"  - datetime of entry (for stop delay calculation)
+    "stop_active" - False during delay window, True once armed
 
 All v14 fixes retained:
   - Scale-out at target (target_scale_out=0.5)
@@ -311,8 +311,8 @@ All v11 fixes retained:
 All v10 fixes retained:
   - Backtest sleep guard (is_backtesting)
 
-TrendFilteredORB Strategy — v14
-────────────────────────────────
+TrendFilteredORB Strategy - v14
+
 NEW: Scale-out at target + trailing stop on remainder.
 
   BEHAVIOUR:
@@ -322,18 +322,18 @@ NEW: Scale-out at target + trailing stop on remainder.
     run with a trailing stop, allowing winners to compound intraday.
 
     Trailing stop anchors at the target price after scale-out so the
-    remainder can never turn into a loser — the worst case is exiting
+    remainder can never turn into a loser - the worst case is exiting
     the second half at the target level (same as the old full-exit).
 
   NEW PARAMETERS:
-    target_scale_out  (default 0.5)  — fraction sold at target; 1.0 = old behaviour
-    trail_stop_pct    (default 0.015) — trailing stop % on remainder; 0.0 = disabled
+    target_scale_out  (default 0.5)  - fraction sold at target; 1.0 = old behaviour
+    trail_stop_pct    (default 0.015) - trailing stop % on remainder; 0.0 = disabled
 
   POSITION LIFECYCLE after scale-out:
-    1. Price hits target   → sell 50%, set pos["scaled_out"]=True, raise stop to target
-    2. Price keeps rising  → trailing stop ratchets up every 5-min bar
-    3. Price reverses      → trailing stop fires, close remaining 50%
-    4. 3:45 PM EOD         → _close_leveraged_positions closes any remainder
+    1. Price hits target   -> sell 50%, set pos["scaled_out"]=True, raise stop to target
+    2. Price keeps rising  -> trailing stop ratchets up every 5-min bar
+    3. Price reverses      -> trailing stop fires, close remaining 50%
+    4. 3:45 PM EOD         -> _close_leveraged_positions closes any remainder
 
   _close_single_position updated to use broker live qty as source of truth,
   falling back to pos["qty_remaining"] after a partial scale-out.
@@ -350,22 +350,22 @@ All v11 fixes retained:
 All v10 fixes retained:
   - Backtest sleep guard (is_backtesting)
 
-TrendFilteredORB Strategy — v13
-────────────────────────────────
+TrendFilteredORB Strategy - v13
+
 FIX: Minimum stop distance scaled by leverage multiple.
 
   ROOT CAUSE: min_stop_pct=0.5% was applied flat to all exec_tickers.
   On a 3x leveraged ETF (TQQQ, SQQQ, SOXL etc) 0.5% is equivalent to only
-  ~0.17% on the underlying — smaller than normal intrabar bid/ask spread noise.
+  ~0.17% on the underlying - smaller than normal intrabar bid/ask spread noise.
   Result: stop-outs within seconds of entry even after the v11 price-space fix.
 
   FIX: min_stop_pct is now multiplied by the leverage factor of exec_ticker:
-    1x ETFs / direct trades  → min_stop_pct × 1.0  (unchanged, e.g. 0.5%)
-    2x ETFs                  → min_stop_pct × 2.0  (e.g. 1.0%)
-    3x ETFs                  → min_stop_pct × 3.0  (e.g. 1.5%)
+    1x ETFs / direct trades  -> min_stop_pct x 1.0  (unchanged, e.g. 0.5%)
+    2x ETFs                  -> min_stop_pct x 2.0  (e.g. 1.0%)
+    3x ETFs                  -> min_stop_pct x 3.0  (e.g. 1.5%)
 
   With default min_stop_pct=0.5%, a 3x ETF now has a 1.5% stop floor,
-  which corresponds to ~0.5% on the underlying — the intended behaviour.
+  which corresponds to ~0.5% on the underlying - the intended behaviour.
   The leverage multiple is detected from exec_ticker name at runtime.
 
 All v12 fixes retained:
@@ -377,8 +377,8 @@ All v11 fixes retained:
 All v10 fixes retained:
   - Backtest sleep guard (is_backtesting)
 
-TrendFilteredORB Strategy — v12
-────────────────────────────────
+TrendFilteredORB Strategy - v12
+
 FIX: Block re-entry after STOP or TARGET exits (one trade per symbol per session).
 
   ROOT CAUSE: _close_single_position() always reset trade_taken=False on any
@@ -388,7 +388,7 @@ FIX: Block re-entry after STOP or TARGET exits (one trade per symbol per session
 
   FIX: STOP and TARGET exits now keep trade_taken=True for the rest of the
   trading day. EOD, SELL_SIGNAL, PRELIM/FINAL_SELL_SIGNAL, and STRATEGY_END
-  closes still reset to False — those are intentional position changes, not
+  closes still reset to False - those are intentional position changes, not
   failed breakouts.
 
   Expected effect: trade count drops from ~2/day to ~1/day per symbol.
@@ -401,8 +401,8 @@ All v11 fixes retained:
   - All v9 order direction fixes
   - All v7/v8 sizing guards and breakout filter
 
-TrendFilteredORB Strategy — v11
-────────────────────────────────
+TrendFilteredORB Strategy - v11
+
 CRITICAL FIX in v11: Stop/target calculated in exec_ticker price space.
 
   ROOT CAUSE: stop and target were derived from the signal symbol's price
@@ -423,7 +423,7 @@ CRITICAL FIX in v11: Stop/target calculated in exec_ticker price space.
   Also:
   - entry_price in journal and _positions now uses exec_current (correct fill)
   - Log message now shows both signal price and exec price:
-    "QQQ(490.23)→SQQQ x30 @ 171.45 | Stop:170.59 Target:173.03"
+    "QQQ(490.23)->SQQQ x30 @ 171.45 | Stop:170.59 Target:173.03"
   - exec_current fetched before sizing; returns None if unavailable
 
 All v10 fixes retained:
@@ -469,10 +469,10 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Signal symbols the bot monitors. Execution ETFs come from leverage_map.py.
-# QQQ → TQQQ (bull) / SQQQ (bear)   Nasdaq-100 3×
-# SMH → SOXL (bull) / SOXS (bear)   Semiconductor 3×
+# QQQ -> TQQQ (bull) / SQQQ (bear)   Nasdaq-100 3x
+# SMH -> SOXL (bull) / SOXS (bear)   Semiconductor 3x
 SIGNAL_SYMBOLS = ["QQQ", "SMH"]
-SIGNAL_SYMBOL  = SIGNAL_SYMBOLS[0]   # legacy compat — primary signal for logging
+SIGNAL_SYMBOL  = SIGNAL_SYMBOLS[0]   # legacy compat - primary signal for logging
 BIAS_CACHE          = "cache/daily_bias.json"
 BIAS_CACHE_BACKTEST = "cache/daily_bias_backtest.json"
 
@@ -482,11 +482,11 @@ SIGNAL_PRELIM_MINUTE = 50
 MARKET_OPEN_TIME  = dtime(9, 30)
 MARKET_CLOSE_TIME = dtime(16, 25)
 
-# ORB entry window — 2-min iterations during this window
+# ORB entry window - 2-min iterations during this window
 ORB_ENTRY_START = dtime(9, 45)
-ORB_ENTRY_END   = dtime(10, 30)  # 10:30 AM cutoff — late ORB entries have lower win rates
+ORB_ENTRY_END   = dtime(10, 30)  # 10:30 AM cutoff - late ORB entries have lower win rates
 
-# All execution tickers — derived from leverage_map so adding a new symbol
+# All execution tickers - derived from leverage_map so adding a new symbol
 # to LEVERAGE_MAP automatically includes its ETFs here.
 LEVERAGED_TICKERS = get_all_exec_tickers()   # {"TQQQ","SQQQ","SOXL","SOXS"}
 
@@ -505,8 +505,8 @@ class TrendFilteredORB(Strategy):
         "bar_minutes":               5,
         "risk_pct":                  0.10,   # max loss per trade as % of portfolio (10% = $200 on $2k)
         "reward_ratio":              2.0,
-        "eod_exit_time":             "15:56",   # 3:56 PM — maximize gains before 4 PM
-        # Live defaults — backtest runner overrides these in PARAMS
+        "eod_exit_time":             "15:56",   # 3:56 PM - maximize gains before 4 PM
+        # Live defaults - backtest runner overrides these in PARAMS
         "max_positions":             1,    # 1 trade at a time (QQQ only)
         "ai_min_confidence":         0.55,
         "hold_override":             False,
@@ -515,16 +515,16 @@ class TrendFilteredORB(Strategy):
         # max_position_pct = total capital to deploy across all active positions.
         # For a single symbol (QQQ only): 1.0 = use full account on one trade.
         # For multiple symbols: capital is split proportional to conviction score.
-        #   e.g. QQQ cv=83, SMH cv=52 → QQQ gets 61%, SMH gets 39% of total pool.
+        #   e.g. QQQ cv=83, SMH cv=52 -> QQQ gets 61%, SMH gets 39% of total pool.
         # risk_pct remains the max loss per trade regardless of position size.
         "max_position_pct":          1.0,   # total capital to deploy across all positions (1.0 = full account)
         "min_breakout_pct":          0.001,
-        # ── Trailing stop ─────────────────────────────────────────────────
+        #  Trailing stop 
         # trail_stop_pct: trailing stop % below the highest price seen since entry.
         #   The stop ratchets up as price rises but never moves down.
         #   2.0% is the recommended default for 3x leveraged ETFs (TQQQ/SQQQ):
-        #     - Normal intrabar noise on TQQQ is ~0.9–1.5% (3× QQQ's 0.3–0.5%)
-        #     - 2% is just above that noise floor — won't get knocked out by a
+        #     - Normal intrabar noise on TQQQ is ~0.9-1.5% (3x QQQ's 0.3-0.5%)
+        #     - 2% is just above that noise floor - won't get knocked out by a
         #       single noisy bar, but will catch a genuine trend reversal
         #     - On the strongest trending days EOD close beats any trailing stop
         #       (~60% of trending days continue into the close) so the EOD forced
@@ -532,7 +532,7 @@ class TrendFilteredORB(Strategy):
         #   0.0 = disabled (hold to EOD or until SELL signal)
         "trail_stop_pct":      0.02,
 
-        # ── Target behaviour ─────────────────────────────────────────────
+        #  Target behaviour 
         # target_exit: whether to close the position when the initial target is hit.
         #   False (recommended for ORB): let the trail and EOD handle the exit.
         #     The initial_target is still calculated and logged for reference,
@@ -543,11 +543,11 @@ class TrendFilteredORB(Strategy):
         "target_exit":         False,
         "target_scale_out":    1.0,    # unused when target_exit=False
 
-        # ── Stop placement & delay ────────────────────────────────────────
+        #  Stop placement & delay 
         # stop_mode:
-        #   "or_low"    — stop at OR low (textbook ORB placement)
-        #   "or_mid"    — legacy stop at OR midpoint (tighter)
-        #   "fixed_pct" — fixed % below exec entry price
+        #   "or_low"    - stop at OR low (textbook ORB placement)
+        #   "or_mid"    - legacy stop at OR midpoint (tighter)
+        #   "fixed_pct" - fixed % below exec entry price
         # stop_delay_minutes:
         #   Minutes after entry before the stop becomes active.
         #   Protects against stop-hunt wicks in the first 15 min.
@@ -555,10 +555,10 @@ class TrendFilteredORB(Strategy):
         "stop_delay_minutes":  15,
     }
 
-    # ── Lifecycle ──────────────────────────────────────────────────────────
+    #  Lifecycle 
 
     def initialize(self):
-        # Start with default sleeptime — switches to ORB speed at 9:45 AM
+        # Start with default sleeptime - switches to ORB speed at 9:45 AM
         self.sleeptime = self.parameters.get("sleeptime_default", "5M")
         self.set_market("NYSE")
 
@@ -573,27 +573,27 @@ class TrendFilteredORB(Strategy):
         self._orb_state   = {}
         self._positions   = {}
         self._trade_ids   = {}
-        self._traded_today = set()  # symbols traded today — blocks re-entry
+        self._traded_today = set()  # symbols traded today - blocks re-entry
         self._daily_bias = self._load_bias()
         self._journal    = TradeJournal()
 
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
-            self.log_message("BACKTEST MODE — AI/regime skipped for speed")
+            self.log_message("BACKTEST MODE - AI/regime skipped for speed")
         else:
             try:
                 available = check_ollama_available()
                 if available:
-                    self.log_message("Ollama ready — AI grading active")
+                    self.log_message("Ollama ready - AI grading active")
                 else:
                     self.log_message(
-                        "⚠️  Ollama unavailable — trades will use fallback "
+                        "!  Ollama unavailable - trades will use fallback "
                         "confidence (0.5x size). Run: ollama serve"
                     )
             except Exception as e:
                 self.log_message(f"Ollama warmup error: {e}")
 
         self.log_message(
-            f"Initialized | signal: {SIGNAL_SYMBOL} → TQQQ/SQQQ | "
+            f"Initialized | signal: {SIGNAL_SYMBOL} -> TQQQ/SQQQ | "
             f"portfolio: ${self.portfolio_value:,.2f} | "
             f"sleeptime: ORB={self.parameters['sleeptime_orb']} "
             f"default={self.parameters['sleeptime_default']}"
@@ -605,20 +605,20 @@ class TrendFilteredORB(Strategy):
         try:
             self._run_eod_signals(label="STARTUP")
         except Exception as e:
-            print(f"[startup] Bias refresh failed: {e} — using cached bias")
+            print(f"[startup] Bias refresh failed: {e} - using cached bias")
 
         print("[startup] Pre-warming earnings cache...")
         try:
             from strategies.earnings_filter import prefetch_earnings
             ETF_SYMBOLS = {"QQQ", "SMH", "SPY", "IWM", "DIA", "XLK", "XLF",
                            "TQQQ", "SQQQ", "SOXL", "SOXS"}
-            # Only prefetch for non-ETF symbols — ETFs have no earnings
+            # Only prefetch for non-ETF symbols - ETFs have no earnings
             non_etf = [s for s in self._load_symbols() if s.upper() not in ETF_SYMBOLS]
             if non_etf:
                 prefetch_earnings(non_etf)
                 print(f"[startup] Earnings cache ready for {len(non_etf)} symbols")
             else:
-                print("[startup] All symbols are ETFs — skipping earnings prefetch")
+                print("[startup] All symbols are ETFs - skipping earnings prefetch")
         except Exception as e:
             print(f"[startup] Earnings pre-fetch skipped: {e}")
 
@@ -647,11 +647,11 @@ class TrendFilteredORB(Strategy):
         bias_date = next(iter(self._daily_bias.values()), {}).get("date") if self._daily_bias else None
         today_str = self.get_datetime().date().strftime("%Y-%m-%d")
         if not self._daily_bias or bias_date != today_str:
-            self.log_message(f"Bias is from {bias_date or 'empty'} — refreshing for {today_str}")
+            self.log_message(f"Bias is from {bias_date or 'empty'} - refreshing for {today_str}")
             self._run_eod_signals(label="PRE-MARKET")
         else:
             self.log_message(
-                f"Bias current ({bias_date}, {len(self._daily_bias)} symbols) — "
+                f"Bias current ({bias_date}, {len(self._daily_bias)} symbols) - "
                 f"skipping pre-market refresh"
             )
 
@@ -669,37 +669,43 @@ class TrendFilteredORB(Strategy):
                     f"Pre-market enrichment complete | gaps: {gap_ups} up / {gap_downs} down"
                 )
             except Exception as e:
-                self.log_message(f"Pre-market enrichment failed: {e} — using technical bias only")
+                self.log_message(f"Pre-market enrichment failed: {e} - using technical bias only")
 
     def after_market_closes(self):
         """
-        FINAL EOD signals with a short delay for closing prices to settle.
-        Official closing prices on Alpaca can lag 1-3 minutes after market close.
-        We wait after_close_delay_minutes (default 5) to ensure we read final
-        prices, not stale pre-close quotes.
-
-        v10 FIX: sleep is skipped during backtesting via self.is_backtesting.
-        Previously this caused a real 5-minute wall-clock wait per simulated day.
+        Safety net EOD close + FINAL signals.
+        Force-closes any leveraged ETF still open (should have been caught
+        at 3:56 PM intraday but backtest timing can miss it).
+        Then runs FINAL EOD signals on official closing prices.
         """
+        # Safety net: no leveraged ETF should ever be held overnight
+        leveraged_open = [k for k in self._positions if is_leveraged(k)]
+        if leveraged_open:
+            self.log_message(
+                f"WARNING after_market_closes: {leveraged_open} still open "
+                f"- force closing now"
+            )
+            self._close_leveraged_positions("AFTER_CLOSE_SAFETY")
+
         if self._final_signals_done:
             return
 
         delay = self.parameters.get("after_close_delay_minutes", 5)
-        # ── v10 FIX: skip real sleep during backtests ─────────────────────
+        # v10 FIX: skip real sleep during backtests
         if delay > 0 and not self.is_backtesting:
             self.log_message(
-                f"After-close — waiting {delay} min for closing prices to settle..."
+                f"After-close - waiting {delay} min for closing prices to settle..."
             )
             time.sleep(delay * 60)
 
-        self.log_message("After-close — running FINAL EOD signals (official close prices)")
+        self.log_message("After-close - running FINAL EOD signals (official close prices)")
         try:
             self._run_eod_signals(label="FINAL")
             self._final_signals_done = True
         except Exception as e:
             self.log_message(f"FINAL signals error: {e}")
 
-    # ── Main iteration ────────────────────────────────────────────────────
+    #  Main iteration 
 
     def on_trading_iteration(self):
         now   = self.get_datetime()
@@ -724,8 +730,8 @@ class TrendFilteredORB(Strategy):
             self._market_opened_today = True
             self.log_message(f"Market open | {len(self._positions)} positions carried")
 
-        # ── 2-minute iterations all day ───────────────────────────────────
-        # ORB entry window: 9:45–10:30 AM
+        #  2-minute iterations all day 
+        # ORB entry window: 9:45-10:30 AM
         # Position monitoring (stop/trail/EM): active until position closes
         # Once ORB window closes and no positions held, only EOD signals matter
         in_orb = ORB_ENTRY_START <= now.time() <= ORB_ENTRY_END
@@ -733,28 +739,30 @@ class TrendFilteredORB(Strategy):
             self.sleeptime = "2M"
         if in_orb and not self._in_orb_window:
             self._in_orb_window = True
-            self.log_message("ORB window open (9:45–10:30 AM)")
+            self.log_message("ORB window open (9:45-10:30 AM)")
         elif not in_orb and self._in_orb_window:
             self._in_orb_window = False
             if not self._positions:
-                self.log_message("ORB window closed — no position taken today, monitoring EOD signals only")
+                self.log_message("ORB window closed - no position taken today, monitoring EOD signals only")
             else:
-                self.log_message("ORB window closed — monitoring open position every 2M")
+                self.log_message("ORB window closed - monitoring open position every 2M")
 
-        # Skip iterations after ORB window if no positions — nothing to do
-        # until EOD signal runs at 3:50 PM
+        # Skip iterations after ORB window if no positions - nothing to do
+        # until EOD signal runs at 3:50 PM.
+        # IMPORTANT: never skip if we have open positions - must reach EOD close.
         if not in_orb and not self._positions:
-            eod_h, eod_m = map(int, self.parameters["eod_exit_time"].split(":"))
             if now.time() < dtime(SIGNAL_PRELIM_HOUR, SIGNAL_PRELIM_MINUTE):
-                return  # nothing to do — wait for EOD signals
+                return  # nothing to do - wait for EOD signals
 
         eod_h, eod_m = map(int, self.parameters["eod_exit_time"].split(":"))
         if now.time() >= dtime(eod_h, eod_m):
+            # Force-close all leveraged positions - no overnight holding
             self._close_leveraged_positions("EOD")
+            return  # nothing else to do after EOD close
 
         if (now.time() >= dtime(SIGNAL_PRELIM_HOUR, SIGNAL_PRELIM_MINUTE)
                 and not self._prelim_signals_done):
-            self.log_message("3:50 PM — running preliminary EOD signals")
+            self.log_message("3:50 PM - running preliminary EOD signals")
             self._run_eod_signals(label="PRELIM")
             self._prelim_signals_done = True
 
@@ -770,7 +778,7 @@ class TrendFilteredORB(Strategy):
 
         self._monitor_open_positions()
 
-        # ── ORB entries 9:45 AM – 10:30 AM ───────────────────────────────
+        #  ORB entries 9:45 AM - 10:30 AM 
         if in_orb:
             max_pos    = self.parameters["max_positions"]
             slots_free = max_pos - len(self._positions)
@@ -810,7 +818,7 @@ class TrendFilteredORB(Strategy):
                         self._execute_candidate(c)
                         executed += 1
 
-    # ── Broker Position Sync ──────────────────────────────────────────────
+    #  Broker Position Sync 
 
     def _sync_positions_from_broker(self):
         try:
@@ -836,7 +844,7 @@ class TrendFilteredORB(Strategy):
                         )
                     else:
                         self.log_message(
-                            f"No journal record for {ticker} — using default "
+                            f"No journal record for {ticker} - using default "
                             f"stop={stop:.2f} target={target:.2f}"
                         )
                 except Exception:
@@ -853,13 +861,13 @@ class TrendFilteredORB(Strategy):
                 }
                 synced.append(ticker)
                 if is_leveraged(ticker):
-                    self.log_message(f"⚠️  {ticker} is leveraged and open — will close at EOD")
+                    self.log_message(f"!  {ticker} is leveraged and open - will close at EOD")
             if synced:
                 self.log_message(f"Synced from Alpaca: {synced}")
         except Exception as e:
             self.log_message(f"Position sync failed: {e}")
 
-    # ── Sell Signal Exit ──────────────────────────────────────────────────
+    #  Sell Signal Exit 
 
     def _check_and_close_sell_signals(self, reason: str = "SELL_SIGNAL"):
         """
@@ -887,7 +895,7 @@ class TrendFilteredORB(Strategy):
                 continue
 
             self.log_message(
-                f"Signal exit [{reason}] | closing {exec_ticker} — {close_reason}"
+                f"Signal exit [{reason}] | closing {exec_ticker} - {close_reason}"
             )
 
             try:
@@ -900,18 +908,18 @@ class TrendFilteredORB(Strategy):
 
             self._close_single_position(exec_ticker, pos, reason, exit_price)
 
-    # ── Stop/Target Monitor ───────────────────────────────────────────────
+    #  Stop/Target Monitor 
 
     def _monitor_open_positions(self):
         """
         All positions are LONG (we always buy).
 
-        Exit logic (v17 — trail-only, no hard target exit):
+        Exit logic (v17 - trail-only, no hard target exit):
           1. Activate stop after stop_delay_minutes. During the delay window
-             the stop is completely ignored — protects against early wicks.
+             the stop is completely ignored - protects against early wicks.
           2. Once active: ratchet trailing stop up as price rises.
              The stop only ever moves UP, never down.
-          3. If stop hit → close position.
+          3. If stop hit -> close position.
           4. Target is NOT an exit trigger (target_exit=False by default).
              The initial_target is logged for reference but reaching it does
              NOT close the trade. The trail and EOD are the only exits.
@@ -920,15 +928,15 @@ class TrendFilteredORB(Strategy):
         Why trail-only beats scale-out for ORB:
           On the ~60% of trending days where price continues into the close,
           a hard target exit cuts the trade short. The 2% trail is wide enough
-          to survive intrabar noise (TQQQ noise ≈ 0.9–1.5%) while catching
+          to survive intrabar noise (TQQQ noise ~ 0.9-1.5%) while catching
           genuine reversals. EOD close at 3:45 PM handles the rest.
 
         pos dict keys managed here:
-          "stop"        — current stop level (ratcheted up by trail)
-          "stop_active" — False during delay window, True once armed
-          "target"      — reference level only (not an exit trigger)
-          "entry_time"  — datetime of entry (for stop delay calc)
-          "qty"         — original quantity
+          "stop"        - current stop level (ratcheted up by trail)
+          "stop_active" - False during delay window, True once armed
+          "target"      - reference level only (not an exit trigger)
+          "entry_time"  - datetime of entry (for stop delay calc)
+          "qty"         - original quantity
         """
         trail_pct    = self.parameters.get("trail_stop_pct",    0.02)
         target_exit  = self.parameters.get("target_exit",       False)
@@ -943,7 +951,7 @@ class TrendFilteredORB(Strategy):
                     continue
                 current = float(bars.df["close"].iloc[-1])
 
-                # ── 1. Stop delay: arm after N minutes ────────────────────
+                #  1. Stop delay: arm after N minutes 
                 if not pos.get("stop_active", False):
                     entry_time = pos.get("entry_time")
                     if entry_time is not None:
@@ -958,7 +966,7 @@ class TrendFilteredORB(Strategy):
                             if current <= pos["stop"]:
                                 self.log_message(
                                     f"Stop triggered at arm time for {exec_ticker} "
-                                    f"— price {current:.2f} already below "
+                                    f"- price {current:.2f} already below "
                                     f"stop {pos['stop']:.2f}"
                                 )
                                 self._close_single_position(
@@ -968,7 +976,7 @@ class TrendFilteredORB(Strategy):
                     else:
                         pos["stop_active"] = True  # fallback: arm immediately
 
-                # ── 2. Trailing stop ratchet ──────────────────────────────
+                #  2. Trailing stop ratchet 
                 # Only ratchet once the stop is active and price is profitable.
                 if pos.get("stop_active", False) and trail_pct > 0:
                     if current > pos["entry_price"]:
@@ -976,12 +984,12 @@ class TrendFilteredORB(Strategy):
                         if new_trail > pos["stop"]:
                             pos["stop"] = new_trail  # ratchet up, never down
 
-                # ── 3. Stop hit → close ───────────────────────────────────
+                #  3. Stop hit -> close 
                 if pos.get("stop_active", False) and current <= pos["stop"]:
                     self._close_single_position(exec_ticker, pos, "STOP", current)
                     continue
 
-                # ── 4. EM upper boundary exit ────────────────────────────
+                #  4. EM upper boundary exit 
                 # If price reaches the options-implied daily expected move upper
                 # boundary, the market has priced in its maximum expected move.
                 # Skipped in backtest: today's EM options prices don't apply to
@@ -999,8 +1007,8 @@ class TrendFilteredORB(Strategy):
                                 pnl_now = (current - pos["entry_price"]) * pos.get("qty", 0)
                                 self.log_message(
                                     f"EM BOUNDARY HIT {exec_ticker} @ ${current:.2f} "
-                                    f"≥ upper EM ${em_upper:.2f} "
-                                    f"| PnL: ${pnl_now:+.2f} — closing before EOD"
+                                    f">= upper EM ${em_upper:.2f} "
+                                    f"| PnL: ${pnl_now:+.2f} - closing before EOD"
                                 )
                                 self._close_single_position(
                                     exec_ticker, pos, "EM_TARGET", current)
@@ -1008,7 +1016,7 @@ class TrendFilteredORB(Strategy):
                     except Exception:
                         pass
 
-                # ── 5. Hard target exit or milestone log ──────────────────────
+                #  5. Hard target exit or milestone log 
                 target = pos.get("target", 0)
                 if target_exit and current >= target and not pos.get("target_logged", False):
                     # target_exit=True: close immediately (conservative)
@@ -1021,7 +1029,7 @@ class TrendFilteredORB(Strategy):
                     self.log_message(
                         f"TARGET PASSED {exec_ticker} @ {current:.2f} "
                         f"| unrealised PnL: ${pnl_now:+.2f} "
-                        f"| trail={trail_pct*100:.1f}% — letting it ride"
+                        f"| trail={trail_pct*100:.1f}% - letting it ride"
                     )
 
             except Exception as e:
@@ -1031,7 +1039,7 @@ class TrendFilteredORB(Strategy):
                                 reason: str, exit_price: float):
         # After a scale-out, only qty_remaining shares are still open.
         # Always ask the broker for the live position quantity as the
-        # source of truth — don't rely solely on our internal counter.
+        # source of truth - don't rely solely on our internal counter.
         try:
             position    = self.get_position(exec_ticker)
             broker_qty  = int(position.quantity) if position else 0
@@ -1090,14 +1098,14 @@ class TrendFilteredORB(Strategy):
             # tomorrow's clean slate regardless).
             if reason in {"STOP", "TARGET"}:
                 self.log_message(
-                    f"Re-entry blocked for {signal_symbol} today ({reason}) — "
+                    f"Re-entry blocked for {signal_symbol} today ({reason}) - "
                     f"1 trade per symbol per session"
                 )
-                # trade_taken stays True — no re-entry until next trading day
+                # trade_taken stays True - no re-entry until next trading day
             else:
                 self._orb_state[signal_symbol]["trade_taken"] = False
 
-    # ── EOD: Close Leveraged/Inverse ──────────────────────────────────────
+    #  EOD: Close Leveraged/Inverse 
 
     def _close_leveraged_positions(self, reason: str):
         to_close = {
@@ -1122,7 +1130,7 @@ class TrendFilteredORB(Strategy):
         if overnight:
             self.log_message(f"EOD done | holding overnight: {overnight}")
 
-    # ── EOD Signal Runner ─────────────────────────────────────────────────
+    #  EOD Signal Runner 
 
     def _run_eod_signals(self, label: str = "EOD"):
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
@@ -1181,10 +1189,10 @@ class TrendFilteredORB(Strategy):
                     pair = get_leveraged_pair(sym)
                     bull = pair["bull"]; bear = pair["bear"]
                     em_lines.append(
-                        f"{sym}: daily ±${em['daily_em']:.2f} ({em['daily_em_pct']:.1f}%) "
-                        f"[${em['daily_lower']:.2f}–${em['daily_upper']:.2f}] | "
-                        f"{bull}/{bear} ±${em['exec_daily_em']:.2f} "
-                        f"[${em['exec_daily_lower']:.2f}–${em['exec_daily_upper']:.2f}]"
+                        f"{sym}: daily ${em['daily_em']:.2f} ({em['daily_em_pct']:.1f}%) "
+                        f"[${em['daily_lower']:.2f}-${em['daily_upper']:.2f}] | "
+                        f"{bull}/{bear} ${em['exec_daily_em']:.2f} "
+                        f"[${em['exec_daily_lower']:.2f}-${em['exec_daily_upper']:.2f}]"
                     )
                 if em_lines:
                     em_text = "\n" + "\n".join(em_lines)
@@ -1194,7 +1202,7 @@ class TrendFilteredORB(Strategy):
                 self.log_message(f"[{label}] EM fetch failed: {e}")
 
         self.log_message(summary)
-        # EOD signal emails suppressed — swing_signal_engine sends a richer
+        # EOD signal emails suppressed - swing_signal_engine sends a richer
         # EOD report at 4:15 PM covering QQQ and all retirement accounts.
         # Trading bot only notifies on actual trades (entry + exit).
         # To re-enable: uncomment the line below.
@@ -1255,7 +1263,7 @@ class TrendFilteredORB(Strategy):
             f"HOLD:{len(avail_symbols)-len(buys)-len(sells)}"
         )
 
-    # ── Regime Refresh ────────────────────────────────────────────────────
+    #  Regime Refresh 
 
     def _refresh_regime(self, symbol: str):
         try:
@@ -1296,17 +1304,17 @@ class TrendFilteredORB(Strategy):
         except Exception as e:
             self.log_message(f"Regime refresh failed: {e}")
 
-    # ── Per-Symbol ORB Entry ──────────────────────────────────────────────
+    #  Per-Symbol ORB Entry 
 
     def _process_symbol(self, symbol: str, now, today):
         """
         Evaluate whether to enter a position. Always returns a BUY candidate.
 
-        BUY/STRONG_BUY + upside breakout  → BUY pair["bull"]  (is_inverse=False)
-        SELL/STRONG_SELL + no inverse     → SKIP (direct-trade, can't go bearish)
-        SELL/STRONG_SELL + downside break → BUY pair["bear"]  (is_inverse=True)
-        HOLD + upside breakout            → BUY pair["bull"] at 0.5× (is_inverse=False)
-        HOLD + no breakout / downside     → SKIP
+        BUY/STRONG_BUY + upside breakout  -> BUY pair["bull"]  (is_inverse=False)
+        SELL/STRONG_SELL + no inverse     -> SKIP (direct-trade, can't go bearish)
+        SELL/STRONG_SELL + downside break -> BUY pair["bear"]  (is_inverse=True)
+        HOLD + upside breakout            -> BUY pair["bull"] at 0.5x (is_inverse=False)
+        HOLD + no breakout / downside     -> SKIP
         """
         bias   = self._daily_bias.get(symbol, {"action": "HOLD"})
         action = bias.get("action", "HOLD")
@@ -1318,7 +1326,7 @@ class TrendFilteredORB(Strategy):
         pair   = get_leveraged_pair(symbol)
         direct = is_direct_trade(symbol)
 
-        # SELL signal + no inverse ETF → skip
+        # SELL signal + no inverse ETF -> skip
         if want_bear and direct:
             return None
 
@@ -1326,7 +1334,7 @@ class TrendFilteredORB(Strategy):
             return None
 
         # Earnings filter
-        # ETFs never have earnings — skip the check entirely
+        # ETFs never have earnings - skip the check entirely
         # QQQ and SMH are ETFs; earnings filter only applies to individual stocks
         ETF_SYMBOLS = {"QQQ", "SMH", "SPY", "IWM", "DIA", "XLK", "XLF",
                        "TQQQ", "SQQQ", "SOXL", "SOXS"}
@@ -1335,7 +1343,7 @@ class TrendFilteredORB(Strategy):
                 from strategies.earnings_filter import is_earnings_safe, get_earnings_info
                 if not is_earnings_safe(symbol):
                     info = get_earnings_info(symbol)
-                    self.log_message(f"SKIP {symbol} — earnings in {info.get('hours_until','?')}h")
+                    self.log_message(f"SKIP {symbol} - earnings in {info.get('hours_until','?')}h")
                     return None
             except Exception:
                 pass
@@ -1375,7 +1383,7 @@ class TrendFilteredORB(Strategy):
 
         current = float(df_today["close"].iloc[-1])
 
-        # ── Regime ──────────────────────────────────────────────────────
+        #  Regime 
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
             regime          = {"regime": "trending", "confidence": 0.5,
                                "orb_suitability": "moderate",
@@ -1394,10 +1402,10 @@ class TrendFilteredORB(Strategy):
             target_adj      = regime.get("target_adjustment", 1.0)
 
             if regime_type == "low_liquidity":
-                self.log_message(f"SKIP {symbol} — low_liquidity regime")
+                self.log_message(f"SKIP {symbol} - low_liquidity regime")
                 return None
 
-        # ── Breakout check ───────────────────────────────────────────────
+        #  Breakout check 
         min_breakout = self.parameters.get("min_breakout_pct", 0.001)
         is_upside    = current > state["or_high"] * (1 + min_breakout)
         is_downside  = current < state["or_low"]  * (1 - min_breakout)
@@ -1423,7 +1431,7 @@ class TrendFilteredORB(Strategy):
         if not is_inverse and pair.get("bear") in self._positions:
             return None
 
-        # ── AI grading ───────────────────────────────────────────────────
+        #  AI grading 
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
             grading = {"approve": True, "confidence": 0.7, "size_multiplier": 1.0}
         else:
@@ -1442,12 +1450,12 @@ class TrendFilteredORB(Strategy):
         ai_min = self.parameters.get("ai_min_confidence", 0.55)
         if grading["confidence"] < ai_min or not grading.get("approve", True):
             self.log_message(
-                f"SKIP {symbol} — AI {grading['confidence']:.2f} | "
+                f"SKIP {symbol} - AI {grading['confidence']:.2f} | "
                 f"{grading.get('reasoning','')[:80]}"
             )
             return None
 
-        # ── Sizing ───────────────────────────────────────────────────────
+        #  Sizing 
         base_risk    = self.parameters["risk_pct"]
         size_mult    = grading.get("size_multiplier", 1.0)
         if hold_bias:
@@ -1456,10 +1464,10 @@ class TrendFilteredORB(Strategy):
             size_mult *= 0.75
         effective_risk = min(base_risk * size_mult, 0.02)
 
-        # ── v11/v13 FIX: stop/target in exec_ticker price space, scaled for leverage ──
+        #  v11/v13 FIX: stop/target in exec_ticker price space, scaled for leverage 
         # signal symbol (e.g. QQQ) trades at ~$490; exec_ticker (e.g. SQQQ)
         # trades at ~$170. Stop must be in exec_ticker's price space AND must
-        # account for leverage multiplier — a 3x ETF needs 3x the minimum stop
+        # account for leverage multiplier - a 3x ETF needs 3x the minimum stop
         # distance to avoid being stopped out on normal intrabar noise.
         try:
             exec_bars    = self.get_historical_prices(exec_ticker, 2, "5m")
@@ -1470,7 +1478,7 @@ class TrendFilteredORB(Strategy):
             exec_current = None
 
         if exec_current is None or exec_current <= 0:
-            self.log_message(f"SKIP {symbol} — could not fetch {exec_ticker} price for sizing")
+            self.log_message(f"SKIP {symbol} - could not fetch {exec_ticker} price for sizing")
             return None
 
         # Detect leverage multiple from exec_ticker name (2x or 3x)
@@ -1487,7 +1495,7 @@ class TrendFilteredORB(Strategy):
         else:
             lev_mult = 1.0
 
-        # ── Stop placement (v15: or_low mode is the default) ───────────────
+        #  Stop placement (v15: or_low mode is the default) 
         # Convert the chosen stop anchor to a % of the signal symbol's price,
         # then apply that % to exec_ticker's price to get the actual stop level.
         stop_mode    = self.parameters.get("stop_mode", "or_low")
@@ -1508,7 +1516,7 @@ class TrendFilteredORB(Strategy):
             stop_pct_of_signal = min_stop_pct
             exec_risk_dist     = exec_current * stop_pct_of_signal
 
-        else:  # "or_mid" — legacy behaviour
+        else:  # "or_mid" - legacy behaviour
             risk_pct_of_signal = abs(current - state["or_mid"]) * stop_adj / max(current, 0.01)
             risk_pct_of_signal = max(risk_pct_of_signal, min_stop_pct)
             exec_risk_dist     = exec_current * risk_pct_of_signal
@@ -1516,25 +1524,25 @@ class TrendFilteredORB(Strategy):
         if exec_risk_dist <= 0:
             return None
 
-        # ── EM stop floor: widen stop if it's inside expected-move noise ──────
+        #  EM stop floor: widen stop if it's inside expected-move noise 
         # Skipped in backtest: today's options prices don't apply to historical dates.
         if _EM_AVAILABLE and os.getenv("LUMIBOT_BACKTEST_MODE","").lower() != "true":
             try:
                 em = get_expected_move(symbol)   # QQQ or SMH
                 if em:
-                    # EM in exec_ticker space: signal EM × leverage
+                    # EM in exec_ticker space: signal EM x leverage
                     em_floor_dist = (em["daily_em"] * lev_mult) / 3.0
                     if exec_risk_dist < em_floor_dist:
                         self.log_message(
-                            f"Stop widened: OR-low gave ±${exec_risk_dist:.2f} "
-                            f"< EM floor ±${em_floor_dist:.2f} "
-                            f"(QQQ daily EM ${em['daily_em']:.2f} × {lev_mult}× / 3)"
+                            f"Stop widened: OR-low gave ${exec_risk_dist:.2f} "
+                            f"< EM floor ${em_floor_dist:.2f} "
+                            f"(QQQ daily EM ${em['daily_em']:.2f} x {lev_mult}x / 3)"
                         )
                         exec_risk_dist = em_floor_dist
             except Exception:
                 pass
 
-        # Stop below exec entry, target above — always BUY, want price UP
+        # Stop below exec entry, target above - always BUY, want price UP
         initial_stop   = exec_current - exec_risk_dist
         initial_target = exec_current + exec_risk_dist * self.parameters["reward_ratio"] * target_adj
 
@@ -1554,7 +1562,7 @@ class TrendFilteredORB(Strategy):
         if qty < 1:
             return None
 
-        # ── Conviction ───────────────────────────────────────────────────
+        #  Conviction 
         score_key  = "bear_score" if is_inverse else "bull_score"
         sym_score  = bias.get(score_key, 0)
         vol_ratio  = bias.get("vol_ratio", 1.0)
@@ -1588,8 +1596,8 @@ class TrendFilteredORB(Strategy):
             "symbol": symbol, "exec_ticker": exec_ticker,
             "is_inverse": is_inverse,
             "trade_type": trade_type,
-            "current": current,           # signal symbol price (QQQ etc) — for logging
-            "exec_current": exec_current, # exec_ticker price (TQQQ/SQQQ etc) — for orders
+            "current": current,           # signal symbol price (QQQ etc) - for logging
+            "exec_current": exec_current, # exec_ticker price (TQQQ/SQQQ etc) - for orders
             "qty": qty,
             "initial_stop": initial_stop, "initial_target": initial_target,
             "effective_risk": effective_risk, "size_mult": size_mult,
@@ -1607,13 +1615,13 @@ class TrendFilteredORB(Strategy):
         Single symbol:  full max_position_pct pool goes to that symbol.
         Multiple symbols: pool split by conviction weight.
 
-          total_pool = portfolio_value × max_position_pct
-          symbol_allocation = total_pool × (symbol_cv / sum_all_cv)
+          total_pool = portfolio_value x max_position_pct
+          symbol_allocation = total_pool x (symbol_cv / sum_all_cv)
 
-        Example — $2k account, max_position_pct=1.0, QQQ cv=83, SMH cv=52:
+        Example - $2k account, max_position_pct=1.0, QQQ cv=83, SMH cv=52:
           total_pool = $2,000
-          QQQ weight = 83/(83+52) = 61.5% → $1,230
-          SMH weight = 52/(83+52) = 38.5% → $  770
+          QQQ weight = 83/(83+52) = 61.5% -> $1,230
+          SMH weight = 52/(83+52) = 38.5% -> $  770
         """
         total_pool = self.portfolio_value * self.parameters.get("max_position_pct", 1.0)
         if not candidates:
@@ -1629,7 +1637,7 @@ class TrendFilteredORB(Strategy):
             alloc  = round(total_pool * weight, 2)
             allocation[c["symbol"]] = alloc
             self.log_message(
-                f"  Allocation: {c['symbol']} cv={cv:.0f} → "
+                f"  Allocation: {c['symbol']} cv={cv:.0f} -> "
                 f"{weight:.0%} = ${alloc:,.0f}"
             )
         return allocation
@@ -1639,8 +1647,8 @@ class TrendFilteredORB(Strategy):
         exec_ticker  = c["exec_ticker"]
         is_inverse   = c["is_inverse"]
         trade_type   = c["trade_type"]
-        signal_price = c["current"]       # signal symbol price (QQQ etc) — logging only
-        exec_current = c["exec_current"]  # exec_ticker price (TQQQ/SQQQ) — used for journal/pos
+        signal_price = c["current"]       # signal symbol price (QQQ etc) - logging only
+        exec_current = c["exec_current"]  # exec_ticker price (TQQQ/SQQQ) - used for journal/pos
         qty          = c["qty"]
         grading      = c["grading"]
         regime       = c["regime"]
@@ -1662,11 +1670,11 @@ class TrendFilteredORB(Strategy):
             if qty < 1 and qty_from_val >= 1:
                 qty = qty_from_val
             if qty < 1:
-                self.log_message(f"SKIP {exec_ticker} — qty=0 after allocation recalc "
+                self.log_message(f"SKIP {exec_ticker} - qty=0 after allocation recalc "
                                  f"(alloc=${allocated_capital:.0f}, stop_dist=${stop_dist:.2f})")
                 return
 
-        # Always BUY — never short-sell
+        # Always BUY - never short-sell
         try:
             order = self.create_order(exec_ticker, qty, "buy", time_in_force="day")
             self.submit_order(order)
@@ -1674,7 +1682,7 @@ class TrendFilteredORB(Strategy):
             self.log_message(f"Order failed {exec_ticker}: {e}")
             return
 
-        # Inverse ETFs always close at EOD — no overnight holding
+        # Inverse ETFs always close at EOD - no overnight holding
         overnight_eligible = direct and not is_inverse
 
         trade_id = self._journal.open_trade(
@@ -1713,7 +1721,7 @@ class TrendFilteredORB(Strategy):
             "target": c["initial_target"], # already in exec_ticker price space
             "qty": qty,
             "entry_value": self.portfolio_value, "overnight_ok": overnight_eligible,
-            # v15: stop delay — time after entry before stop becomes active
+            # v15: stop delay - time after entry before stop becomes active
             "entry_time":      self.get_datetime(),
             "stop_active":     False,  # becomes True after stop_delay_minutes
         }
@@ -1721,9 +1729,9 @@ class TrendFilteredORB(Strategy):
         state["trade_taken"] = True
 
         o_tag     = " [OVERNIGHT]" if overnight_eligible else " [EOD]"
-        inv_tag   = " → buying inverse ETF" if is_inverse else ""
+        inv_tag   = " -> buying inverse ETF" if is_inverse else ""
 
-        # EM context — validate stop/target against signal symbol expected move
+        # EM context - validate stop/target against signal symbol expected move
         em_note = ""
         if _EM_AVAILABLE and os.getenv("LUMIBOT_BACKTEST_MODE","").lower() != "true":
             try:
@@ -1733,17 +1741,17 @@ class TrendFilteredORB(Strategy):
                         em, exec_current,
                         c["initial_stop"], c["initial_target"], exec_ticker
                     )
-                    em_note = f" | EM:{ctx['quality']}(±${ctx['em_val']:.2f})"
+                    em_note = f" | EM:{ctx['quality']}(${ctx['em_val']:.2f})"
                     if ctx.get("beyond_em"):
-                        em_note += " 🎯"
+                        em_note += " "
                     if ctx["quality"] == "tight":
                         self.log_message(
-                            f"⚠️  Stop inside EM noise: {ctx['notes']}")
+                            f"!  Stop inside EM noise: {ctx['notes']}")
             except Exception:
                 pass
 
         msg = (
-            f"{trade_type} | {symbol}({signal_price:.2f})→{exec_ticker} x{qty} "
+            f"{trade_type} | {symbol}({signal_price:.2f})->{exec_ticker} x{qty} "
             f"@ {exec_current:.2f} | Stop:{c['initial_stop']:.2f} "
             f"Target:{c['initial_target']:.2f} | "
             f"AI:{grading['confidence']:.2f}({c['size_mult']:.1f}x) | "
@@ -1753,7 +1761,7 @@ class TrendFilteredORB(Strategy):
         self.log_message(msg)
         self._notify(f"Trade-Bot: BUY {exec_ticker} ({trade_type})", msg)
 
-    # ── Helpers ───────────────────────────────────────────────────────────
+    #  Helpers 
 
     def _notify(self, subject: str, body: str):
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
@@ -1768,7 +1776,7 @@ class TrendFilteredORB(Strategy):
 
     def _load_symbols(self) -> list:
         # Returns all signal symbols from the leverage map.
-        # Add new symbols by updating leverage_map.py — no other change needed.
+        # Add new symbols by updating leverage_map.py - no other change needed.
         return list(SIGNAL_SYMBOLS)
 
     def _bias_path(self) -> str:
@@ -1795,7 +1803,7 @@ class TrendFilteredORB(Strategy):
         except Exception as e:
             self.log_message(f"Bias save failed: {e}")
 
-    # ── Shutdown ──────────────────────────────────────────────────────────
+    #  Shutdown 
 
     def on_strategy_end(self):
         self._close_leveraged_positions("STRATEGY_END")
