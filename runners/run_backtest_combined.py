@@ -232,7 +232,7 @@ if __name__ == "__main__":
         backtesting_end=END,
         pandas_data=pandas_data,
         parameters=PARAMS,
-        initial_portfolio_value=STARTING_CAPITAL,
+        budget=STARTING_CAPITAL,
         show_plot=True,
         show_tearsheet=True,
         save_tearsheet=True,
