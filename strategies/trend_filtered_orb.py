@@ -450,6 +450,11 @@ from strategies.ai_engine import (
     detect_regime, get_cached_regime, narrate_trade,
 )
 from strategies.trade_journal import TradeJournal
+try:
+    from strategies.expected_move import get_qqq_expected_move, em_context_for_trade
+    _EM_AVAILABLE = True
+except ImportError:
+    _EM_AVAILABLE = False
 from notifications.emailer import send_email
 from notifications.discord import send_discord_message
 from notifications.telegram import send_telegram_message
@@ -952,10 +957,37 @@ class TrendFilteredORB(Strategy):
                     self._close_single_position(exec_ticker, pos, "STOP", current)
                     continue
 
-                # ── 4. Target reached — log only (no exit) ────────────────
+                # ── 4. EM upper boundary exit ────────────────────────────
+                # If price reaches the options-implied daily expected move upper
+                # boundary, the market has priced in its maximum expected move.
+                # Statistically the right time to take profits rather than wait.
+                em_exit = self.parameters.get("em_boundary_exit", True)
+                if em_exit and _EM_AVAILABLE and not pos.get("em_exit_checked", False):
+                    try:
+                        em = get_qqq_expected_move()
+                        if em:
+                            # Use TQQQ upper if that's what we're holding
+                            em_upper = em.get("tqqq_daily_upper", 0)
+                            if exec_ticker == "SQQQ":
+                                # SQQQ profits when QQQ goes down — exit at lower EM
+                                em_upper = em.get("tqqq_daily_upper", 0)  # symmetric
+                            if em_upper > 0 and current >= em_upper:
+                                pnl_now = (current - pos["entry_price"]) * pos.get("qty", 0)
+                                self.log_message(
+                                    f"EM BOUNDARY HIT {exec_ticker} @ ${current:.2f} "
+                                    f"≥ upper EM ${em_upper:.2f} "
+                                    f"| PnL: ${pnl_now:+.2f} — closing before EOD"
+                                )
+                                self._close_single_position(
+                                    exec_ticker, pos, "EM_TARGET", current)
+                                continue
+                    except Exception:
+                        pass
+
+                # ── 5. Hard target exit or milestone log ──────────────────────
                 target = pos.get("target", 0)
                 if target_exit and current >= target and not pos.get("target_logged", False):
-                    # target_exit=True: close immediately (swing mode / conservative)
+                    # target_exit=True: close immediately (conservative)
                     self._close_single_position(exec_ticker, pos, "TARGET", current)
                     continue
                 elif not target_exit and current >= target and not pos.get("target_logged", False):
@@ -1116,8 +1148,29 @@ class TrendFilteredORB(Strategy):
             f"Buys:  {', '.join(buys[:12])}\n"
             f"Sells: {', '.join(sells[:12])}"
         )
+        # Fetch and log QQQ expected move for next session
+        em_text = ""
+        if _EM_AVAILABLE and label in ("FINAL", "PRELIM", "EOD"):
+            try:
+                em = get_qqq_expected_move(force=True)
+                if em:
+                    em_text = (
+                        f"\nQQQ expected move: "
+                        f"daily ±${em['daily_em']:.2f} ({em['daily_em_pct']:.1f}%) "
+                        f"[${em['daily_lower']:.2f}–${em['daily_upper']:.2f}]\n"
+                        f"Weekly ±${em['weekly_em']:.2f} "
+                        f"[${em['weekly_lower']:.2f}–${em['weekly_upper']:.2f}]\n"
+                        f"TQQQ/SQQQ daily EM: ±${em['tqqq_daily_em']:.2f} "
+                        f"[${em['tqqq_daily_lower']:.2f}–${em['tqqq_daily_upper']:.2f}]"
+                    )
+                    self.log_message(f"[{label}] QQQ EM: daily ±${em['daily_em']:.2f} "
+                                     f"[${em['daily_lower']:.2f}–${em['daily_upper']:.2f}] | "
+                                     f"weekly ±${em['weekly_em']:.2f}")
+            except Exception as e:
+                self.log_message(f"[{label}] EM fetch failed: {e}")
+
         self.log_message(summary)
-        self._notify(f"Trade-Bot: [{label}] EOD Signals", summary)
+        self._notify(f"Trade-Bot: [{label}] EOD Signals", summary + em_text)
 
     def _run_eod_signals_backtest(self, label: str):
         all_symbols   = self._load_symbols()
@@ -1427,6 +1480,25 @@ class TrendFilteredORB(Strategy):
         if exec_risk_dist <= 0:
             return None
 
+        # ── EM stop floor: widen stop if it's inside expected-move noise ──────
+        # If OR-low stop < 1/3 of daily EM, the stop will be triggered by
+        # normal intraday noise rather than a real reversal. Widen to EM/3.
+        if _EM_AVAILABLE:
+            try:
+                em = get_qqq_expected_move()
+                if em:
+                    # EM in exec_ticker space: QQQ daily EM × leverage
+                    em_floor_dist = (em["daily_em"] * lev_mult) / 3.0
+                    if exec_risk_dist < em_floor_dist:
+                        self.log_message(
+                            f"Stop widened: OR-low gave ±${exec_risk_dist:.2f} "
+                            f"< EM floor ±${em_floor_dist:.2f} "
+                            f"(QQQ daily EM ${em['daily_em']:.2f} × {lev_mult}× / 3)"
+                        )
+                        exec_risk_dist = em_floor_dist
+            except Exception:
+                pass
+
         # Stop below exec entry, target above — always BUY, want price UP
         initial_stop   = exec_current - exec_risk_dist
         initial_target = exec_current + exec_risk_dist * self.parameters["reward_ratio"] * target_adj
@@ -1554,13 +1626,33 @@ class TrendFilteredORB(Strategy):
 
         o_tag     = " [OVERNIGHT]" if overnight_eligible else " [EOD]"
         inv_tag   = " → buying inverse ETF" if is_inverse else ""
+
+        # EM context — validate stop/target against QQQ daily expected move
+        em_note = ""
+        if _EM_AVAILABLE:
+            try:
+                em = get_qqq_expected_move()
+                if em:
+                    ctx = em_context_for_trade(
+                        em, exec_current,
+                        c["initial_stop"], c["initial_target"], exec_ticker
+                    )
+                    em_note = f" | EM:{ctx['quality']}(±${ctx['em_val']:.2f})"
+                    if ctx.get("beyond_em"):
+                        em_note += " 🎯"
+                    if ctx["quality"] == "tight":
+                        self.log_message(
+                            f"⚠️  Stop inside EM noise: {ctx['notes']}")
+            except Exception:
+                pass
+
         msg = (
             f"{trade_type} | {symbol}({signal_price:.2f})→{exec_ticker} x{qty} "
             f"@ {exec_current:.2f} | Stop:{c['initial_stop']:.2f} "
             f"Target:{c['initial_target']:.2f} | "
             f"AI:{grading['confidence']:.2f}({c['size_mult']:.1f}x) | "
             f"Conviction:{c['conviction']:.0f} | "
-            f"Regime:{regime.get('regime','?')}{inv_tag}{o_tag}"
+            f"Regime:{regime.get('regime','?')}{inv_tag}{o_tag}{em_note}"
         )
         self.log_message(msg)
         self._notify(f"Trade-Bot: BUY {exec_ticker} ({trade_type})", msg)

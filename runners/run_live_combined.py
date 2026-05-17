@@ -99,6 +99,7 @@ def main():
         "target_exit":         False,
         "target_scale_out":    1.0,    # unused
         "trail_stop_pct":      0.02,   # 2% trailing stop
+        "em_boundary_exit":    True,   # close if price hits options EM upper boundary
     }
 
     broker   = Alpaca(BROKER_CONFIG)
