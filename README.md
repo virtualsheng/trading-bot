@@ -2,7 +2,7 @@
 
 AI-enhanced algorithmic trading bot for US equities. Trades **QQQ only** — buys TQQQ (3× bull) on BUY signals and SQQQ (3× bear) on SELL signals. Runs on a $2,000 Alpaca cash account with one trade per day.
 
-> **Swing trading signals for retirement accounts** are handled by the separate [`swing_signal_engine/`](https://github.com/virtualsheng/swing-signal-engine) project.
+> **Swing trading signals for retirement accounts** are handled by the separate [`swing_signal_engine/`](../swing_signal_engine) project.
 
 ---
 
@@ -17,11 +17,13 @@ Ollama AI Setup Grader → confidence score + size multiplier
   ↓
 Regime Detector (trending / ranging / volatile)
   ↓
+Options Expected Move → validates stop distance, sets EM exit boundary
+  ↓
 Position entry: BUY TQQQ or BUY SQQQ
   ↓
 Trailing stop (2%) ratchets up as price rises
   ↓
-Exit: trail fires OR EOD close at 3:45 PM
+Exit: trail fires  OR  EM boundary hit  OR  EOD close at 3:45 PM
 ```
 
 ---
@@ -66,6 +68,7 @@ All parameters are set in `PARAMS` inside `runners/run_live_combined.py`:
 | `stop_delay_minutes` | `15` | Stop inactive for first 15 min |
 | `trail_stop_pct` | `0.02` | 2% trailing stop |
 | `target_exit` | `False` | No hard target — trail + EOD exits |
+| `em_boundary_exit` | `True` | Close if price hits options EM upper boundary |
 | `reward_ratio` | `2.0` | 2:1 reference target |
 | `ai_min_confidence` | `0.55` | Minimum AI confidence to enter |
 | `min_stop_pct` | `0.005` | Floor stop (×3 = 1.5% for TQQQ/SQQQ) |
@@ -78,12 +81,38 @@ All parameters are set in `PARAMS` inside `runners/run_live_combined.py`:
 
 ## Exit logic
 
-No hard target exit. The trade rides until one of two things happens:
+Three ways a position closes — whichever fires first:
 
-1. **Trailing stop fires** — stop ratchets up 2% below the highest price seen since entry. Catches genuine reversals while surviving normal TQQQ intrabar noise (~0.9–1.5%).
-2. **EOD close at 3:45 PM** — TQQQ/SQQQ are always closed before end of day. No overnight holding of leveraged ETFs.
+**1. Trailing stop** — arms after 15 minutes. Ratchets up 2% below the highest price seen. Catches genuine reversals while surviving TQQQ intrabar noise (~0.9–1.5%).
 
-When price passes the initial target it logs: `TARGET PASSED TQQQ @ 34.56 | unrealised PnL: +$54.24 | trail=2.0% — letting it ride`
+**2. EM boundary exit** (`em_boundary_exit=True`) — if TQQQ reaches the options-implied daily upper boundary, the market has delivered its maximum statistically expected move for the day. Close immediately rather than risk reversal into close. Logged as `EM_TARGET`. Set to `False` to disable.
+
+**3. EOD close at 3:45 PM** — TQQQ/SQQQ always closed before end of day. No overnight holding of leveraged ETFs.
+
+---
+
+## Options Expected Move
+
+Fetched from the QQQ options chain at startup using the ATM straddle.
+
+```
+Expected Move  = ATM straddle price × 0.68   (1 standard deviation)
+TQQQ/SQQQ EM  = QQQ daily EM × 3             (3× leverage)
+```
+
+**Stop floor** — if OR-low produces a stop < `daily_EM / 3`, automatically widens it to avoid noise-triggered exits:
+```
+Stop widened: OR-low gave ±$0.31 < EM floor ±$1.14 (QQQ EM $0.38 × 3 / 3)
+```
+
+**EOD notification** includes expected move context for next session:
+```
+QQQ expected move: daily ±$3.80 (0.8%) [$496.20–$503.80]
+Weekly ±$7.20 [$492.80–$507.20]
+TQQQ/SQQQ daily EM: ±$11.40 [$24.60–$47.40]
+```
+
+EM features are **live-only** — backtests skip them since historical options data is not available via free yfinance.
 
 ---
 
@@ -91,14 +120,15 @@ When price passes the initial target it logs: `TARGET PASSED TQQQ @ 34.56 | unre
 
 | Time (ET) | Event |
 |---|---|
-| Script start | Ollama warmup, bias refresh |
+| Script start | Ollama warmup, bias refresh, EM fetch |
 | ~9:00 AM | Earnings cache cleared, regime pre-warmed |
 | 9:30 AM | Position sync from Alpaca |
-| 9:45 AM | ORB entry window opens (2-min iterations) |
-| 9:45 AM – noon | ORB entries evaluated |
+| 9:45 AM | ORB entry window opens |
+| 9:45 AM – noon | ORB entries evaluated (2-min iterations) |
+| Intraday | EM boundary checked every iteration |
 | 3:45 PM | TQQQ / SQQQ forced close |
-| 3:50 PM | PRELIM EOD signals |
-| ~4:05 PM | FINAL EOD signals via `after_market_closes()` |
+| 3:50 PM | PRELIM EOD signals + next-session EM |
+| ~4:05 PM | FINAL EOD signals |
 
 ---
 
@@ -106,60 +136,41 @@ When price passes the initial target it logs: `TARGET PASSED TQQQ @ 34.56 | unre
 
 ### Prerequisites
 
-- **Python 3.12** — LumiBot's `numba` dependency requires < 3.14
+- **Python 3.12** — LumiBot's `numba` requires < 3.14
 - **[Ollama](https://ollama.com)** — installed and running locally
 - **[Alpaca](https://alpaca.markets)** — cash account (paper or live)
 
-### Install Ollama model
+### Install
 
 ```bash
 ollama pull qwen3:8b
-```
 
-### Clone and install
-
-```bash
 git clone https://github.com/virtualsheng/trading-bot.git
 cd trading-bot
 
 py -3.12 -m venv venv
-venv\Scripts\activate        # Windows
+venv\Scripts\activate
 
-pip install --upgrade pip
 pip install lumibot pandas numpy python-dotenv yfinance
 pip install alpaca-trade-api alpaca-py requests pytz
 ```
 
-### Configure .env
+### Configure and run
 
 ```bash
-copy .env.example .env
-# Fill in your Alpaca API keys and notification credentials
-```
-
-### Run
-
-```bat
-start_bot.bat
-```
-
-Or manually:
-
-```bash
-python runners/run_live_combined.py
+copy .env.example .env   # fill in API keys
+start_bot.bat            # launches dashboard + bot
 ```
 
 ---
 
 ## Environment variables
 
-See `.env.example` for the full template.
-
 ```env
 # Required
 ALPACA_API_KEY=your_key
 ALPACA_API_SECRET=your_secret
-ALPACA_IS_PAPER=true          # true = paper trading, false = live
+ALPACA_IS_PAPER=true
 
 # Notifications (all optional)
 EMAIL_SENDER=you@gmail.com
@@ -176,10 +187,10 @@ TELEGRAM_CHAT_ID=your_chat_id
 
 ```
 trading-bot/
-│
 ├── strategies/
 │   ├── ai_engine.py             # Ollama: setup grader, regime detector, narrator
 │   ├── earnings_filter.py       # Earnings calendar filter (Yahoo Finance)
+│   ├── expected_move.py         # Options implied expected move (QQQ/TQQQ/SQQQ)
 │   ├── leverage_map.py          # QQQ → TQQQ / SQQQ mapping
 │   ├── premarket_signals.py     # Gap analysis + news enrichment
 │   ├── signal_engine.py         # EMA/RSI/MACD/SMA technical signal generator
@@ -192,47 +203,26 @@ trading-bot/
 │   └── run_backtest_combined.py # Backtest runner
 │
 ├── notifications/
-│   ├── discord.py               # Discord webhook
-│   ├── emailer.py               # SMTP email
-│   └── telegram.py              # Telegram bot
+│   ├── discord.py
+│   ├── emailer.py
+│   └── telegram.py
 │
 ├── cache/
-│   ├── daily_bias.json          # EOD signal cache (QQQ)
-│   └── trade_journal.db         # Trade journal (SQLite)
+│   ├── daily_bias.json          # EOD QQQ signal
+│   ├── expected_move_cache.json # Options EM (refreshed daily)
+│   └── trade_journal.db
 │
-├── logs/
-│   └── bot_YYYYMMDD_HHMMSS.log
-│
-├── start_bot.bat                # One-click Windows launcher
-├── check_env.py                 # Validates .env before launch
-├── .env                         # API keys — never commit
-├── .env.example                 # Template
+├── start_bot.bat                # Launches dashboard + bot
+├── check_env.py
+├── .env.example
 └── README.md
 ```
 
 ---
 
-## Notifications
-
-All notifications use the subject prefix `Trade-Bot:` for easy email filtering.
-Fires on: trade entry, trade exit (with P&L), EOD signal summary.
-
-| Channel | Variable |
-|---|---|
-| Email | `EMAIL_SENDER`, `EMAIL_PASSWORD`, `EMAIL_RECIPIENT` |
-| Discord | `DISCORD_WEBHOOK_URL` |
-| Telegram | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
-
----
-
 ## Dashboard
 
-FastAPI server on port 5001. Run alongside the bot:
-
-```bash
-python runners/dashboard_server.py
-# Open: http://localhost:5001
-```
+Launched automatically by `start_bot.bat` on port 5001.
 
 Tabs: **Overview** · **Positions** · **Trade Log** · **Performance** · **Regime**
 
@@ -244,50 +234,40 @@ Tabs: **Overview** · **Positions** · **Trade Log** · **Performance** · **Reg
 python runners/run_backtest_combined.py
 ```
 
-Configured for $2,000 starting capital, QQQ → TQQQ/SQQQ, Mar–May 2025 by default. Edit `START`, `END`, and `STARTING_CAPITAL` in the runner to change the period.
-
-**2-year backtest results (May 2024 – May 2026):**
-- Starting capital: $2,000 → ending ~$5,148
-- Total return: +157% over 2 years (~79% annualized)
-- Win rate: 67% (177/263 trades)
-- Avg win / avg loss ratio: 2.78×
-- Only 3 losing months out of 25
+**2-year results (May 2024 – May 2026):** $2,000 → ~$5,148 (+157%), 67% win rate, 2.78× avg win/loss, 3 losing months out of 25. Trail-only exit, no EM features (not available in backtest).
 
 ---
 
 ## Risk management
 
-- Maximum 1 position at a time (QQQ only)
-- 2% risk per trade (~$40 on $2,000)
-- 40% maximum position size (~$800)
-- Earnings within 48 hours: skip entry
-- Stop inactive first 15 min after entry (stop-hunt protection)
-- TQQQ/SQQQ always closed at 3:45 PM — no overnight holding
-- One entry per day — re-entry blocked after stop or target passed
+- 1 position max · 2% risk · 40% size cap
+- Earnings within 48h: skip entry
+- Stop delay 15 min: protects against opening wicks
+- Stop floor: EM-based minimum prevents noise exits
+- EM boundary exit: locks in gains at statistically maximum daily move
+- EOD hard close 3:45 PM: no overnight leveraged ETF exposure
 
 ---
 
 ## AI layer
 
-### Setup Grader
-Before every entry, Ollama (`qwen3:8b`) grades the setup using the last 25 five-minute candles. Returns confidence 0.0–1.0 and a size multiplier. Entries below 0.55 confidence are skipped.
+**Setup Grader** — Ollama `qwen3:8b` grades each setup on the last 25 five-minute candles. Returns confidence 0.0–1.0 and a size multiplier. Below 0.55 → skip.
 
-### Regime Detector
-Every 30 minutes, classifies QQQ market regime: `trending_up`, `trending_down`, `ranging`, `volatile`, `mean_reversion`, `low_liquidity`. Adjusts stop/target distances and skips entries in unfavorable regimes.
+**Regime Detector** — every 30 min classifies QQQ as `trending_up`, `trending_down`, `ranging`, `volatile`, `mean_reversion`, or `low_liquidity`. Adjusts distances and skips unfavorable regimes.
 
-### Trade Narrator
-After a position closes, generates a 2–3 sentence journal entry stored in the SQLite trade journal.
+**Trade Narrator** — generates a 2–3 sentence journal entry after each close, stored in SQLite.
 
 ---
 
 ## Known limitations
 
-- **Python 3.12 only** — `numba` (required by LumiBot) does not support 3.13+
-- **Cash account T+1 settlement** — funds available next morning after close
-- **Ollama first-call latency** — qwen3:8b takes ~30–45s to load on cold start
+- Python 3.12 only (`numba` incompatible with 3.13+)
+- T+1 cash settlement — funds available next morning
+- Ollama cold-start latency ~30–45s
+- EM boundary exit skipped in backtest (no historical options data)
 
 ---
 
 ## Disclaimer
 
-For educational and research purposes only. Not financial advice. Trading leveraged ETFs carries substantial risk. Paper trade extensively before using real money. Past performance does not guarantee future results.
+Educational and research purposes only. Not financial advice. Trading leveraged ETFs carries substantial risk. Paper trade extensively before using real money.
