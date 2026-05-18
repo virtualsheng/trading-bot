@@ -477,8 +477,6 @@ SIGNAL_SYMBOL  = SIGNAL_SYMBOLS[0]   # legacy compat - primary signal for loggin
 BIAS_CACHE          = "cache/daily_bias.json"
 BIAS_CACHE_BACKTEST = "cache/daily_bias_backtest.json"
 
-SIGNAL_PRELIM_HOUR   = 15
-SIGNAL_PRELIM_MINUTE = 50
 
 MARKET_OPEN_TIME  = dtime(9, 30)
 MARKET_CLOSE_TIME = dtime(16, 25)
@@ -565,7 +563,6 @@ class TrendFilteredORB(Strategy):
 
         self._starting_capital     = self.portfolio_value
         self._last_date            = None
-        self._prelim_signals_done  = False
         self._final_signals_done   = False
         self._market_opened_today  = False
         self._regime_checked_at    = None
@@ -714,7 +711,6 @@ class TrendFilteredORB(Strategy):
 
         if today != self._last_date:
             self._last_date           = today
-            self._prelim_signals_done = False
             self._final_signals_done  = False
             self._market_opened_today = False
             self._in_orb_window       = False
@@ -759,23 +755,9 @@ class TrendFilteredORB(Strategy):
         at_eod = now.time() >= dtime(eod_h, eod_m)
 
         if at_eod:
-            # 1. Close all leveraged positions first — still market hours at 3:50
+            # Force-close all leveraged positions — still market hours at 3:50
             self._close_leveraged_positions("EOD")
-            # 2. Then run PRELIM signals on just-closed prices
-            if not self._prelim_signals_done:
-                self.log_message("3:50 PM - running preliminary EOD signals")
-                self._run_eod_signals(label="PRELIM")
-                self._prelim_signals_done = True
             return  # nothing else to do after EOD close
-
-        if (now.time() >= dtime(SIGNAL_PRELIM_HOUR, SIGNAL_PRELIM_MINUTE)
-                and not self._prelim_signals_done):
-            self.log_message("3:50 PM - running preliminary EOD signals")
-            self._run_eod_signals(label="PRELIM")
-            self._prelim_signals_done = True
-
-        if now.time() >= dtime(eod_h, eod_m):
-            return
 
 
         if (os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() != "true" and
@@ -1189,7 +1171,7 @@ class TrendFilteredORB(Strategy):
         )
         # Fetch and log QQQ expected move for next session
         em_text = ""
-        if _EM_AVAILABLE and label in ("FINAL", "PRELIM", "EOD"):
+        if _EM_AVAILABLE and label in ("FINAL", "EOD"):
             try:
                 all_ems = get_all_expected_moves(force=True)
                 em_lines = []
