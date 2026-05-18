@@ -46,8 +46,8 @@ from strategies.trend_filtered_orb import TrendFilteredORB
 # Free Polygon tier: data available from roughly 2 years ago to present.
 # Best down-market period available: Apr 2025 tariff crash + Iran War volatility.
 # Adjust START/END to the period you want to test.
-START            = datetime(2025, 3, 1)
-END              = datetime(2025, 5, 15)
+START            = datetime(2025, 2, 1)
+END              = datetime(2025, 5, 1)
 
 # Match your actual live account size for realistic position sizing validation.
 # risk_pct=0.10, max_position_pct=1.0 → fills account up to value cap.
@@ -68,7 +68,7 @@ PARAMS = {
     "bar_minutes":        5,
     "risk_pct":           0.10,    # 10% max loss per trade = $200 on $2k
     "reward_ratio":       2.0,
-    "eod_exit_time":      "15:56",
+    "eod_exit_time":      "15:50",   # 3:50 PM - close at market hours
 
     # ── Position limits ──────────────────────────────────────────────────────
     # 2 positions max — one per symbol (QQQ and SMH).

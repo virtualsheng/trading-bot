@@ -505,9 +505,9 @@ class TrendFilteredORB(Strategy):
         "bar_minutes":               5,
         "risk_pct":                  0.10,   # max loss per trade as % of portfolio (10% = $200 on $2k)
         "reward_ratio":              2.0,
-        "eod_exit_time":             "15:56",   # 3:56 PM - maximize gains before 4 PM
+        "eod_exit_time":             "15:50",   # 3:50 PM - close before PRELIM signals, guarantees market hours
         # Live defaults - backtest runner overrides these in PARAMS
-        "max_positions":             1,    # 1 trade at a time (QQQ only)
+        "max_positions":             2,    # 2 trade at a time (QQQ, SMH)
         "ai_min_confidence":         0.55,
         "hold_override":             False,
         "hold_override_size":        0.5,
@@ -675,7 +675,7 @@ class TrendFilteredORB(Strategy):
         """
         Safety net EOD close + FINAL signals.
         Force-closes any leveraged ETF still open (should have been caught
-        at 3:56 PM intraday but backtest timing can miss it).
+        at 3:50 PM intraday but backtest timing can miss it).
         Then runs FINAL EOD signals on official closing prices.
         """
         # Safety net: no leveraged ETF should ever be held overnight
@@ -755,9 +755,16 @@ class TrendFilteredORB(Strategy):
                 return  # nothing to do - wait for EOD signals
 
         eod_h, eod_m = map(int, self.parameters["eod_exit_time"].split(":"))
-        if now.time() >= dtime(eod_h, eod_m):
-            # Force-close all leveraged positions - no overnight holding
+        at_eod = now.time() >= dtime(eod_h, eod_m)
+
+        if at_eod:
+            # 1. Close all leveraged positions first — still market hours at 3:50
             self._close_leveraged_positions("EOD")
+            # 2. Then run PRELIM signals on just-closed prices
+            if not self._prelim_signals_done:
+                self.log_message("3:50 PM - running preliminary EOD signals")
+                self._run_eod_signals(label="PRELIM")
+                self._prelim_signals_done = True
             return  # nothing else to do after EOD close
 
         if (now.time() >= dtime(SIGNAL_PRELIM_HOUR, SIGNAL_PRELIM_MINUTE)
