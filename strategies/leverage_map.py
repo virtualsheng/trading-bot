@@ -34,7 +34,7 @@ LEVERAGE_MAP = {
     "USO": {
         "bull":     "UCO",
         "bear":     "SCO",
-        "leverage": 3,
+        "leverage": 2,
         "note":     "Oil 2× — ProShares Ultra Bloomberg Crude Oil Bull/Bear 2×",
     },
 

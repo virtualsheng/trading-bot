@@ -1492,13 +1492,13 @@ class TrendFilteredORB(Strategy):
         # Detect leverage multiple from exec_ticker name (2x or 3x)
         # Used to scale min_stop_pct so 3x ETFs get a wider stop floor.
         _et = exec_ticker.upper()
-        if any(_et.startswith(p) for p in ("TQQQ","SPXL","SPXS","SOXL","SOXS",
+        if any(_et.startswith(p) for p in ("TQQQ","SQQQ","SPXS","SOXL","SOXS",
                                             "UPRO","SPXU","FAS","FAZ","ERX","ERY",
-                                            "JNUG","JDST","UCO","SCO","BITU","BITI",
+                                            "JNUG","JDST","BITU","BITI",
                                             "NVDL","NVDD","TSMU","PTIR","AGQ","ZSL")):
             lev_mult = 3.0
         elif any(_et.startswith(p) for p in ("UGL","GLL","QLD","QID","SSO","SDS",
-                                              "BITX","SQQQ","TQQQ")):
+                                              "UCO","SCO","BITX")):
             lev_mult = 2.0
         else:
             lev_mult = 1.0
@@ -1623,15 +1623,21 @@ class TrendFilteredORB(Strategy):
         Single symbol:  full max_position_pct pool goes to that symbol.
         Multiple symbols: pool split by conviction weight.
 
-          total_pool = portfolio_value x max_position_pct
+          total_pool = min(portfolio_value, available_cash) x max_position_pct
           symbol_allocation = total_pool x (symbol_cv / sum_all_cv)
+
+        Uses available cash (not total portfolio value) to avoid trying to deploy
+        capital that is already tied up in open positions.
 
         Example - $2k account, max_position_pct=1.0, QQQ cv=83, SMH cv=52:
           total_pool = $2,000
           QQQ weight = 83/(83+52) = 61.5% -> $1,230
           SMH weight = 52/(83+52) = 38.5% -> $  770
         """
-        total_pool = self.portfolio_value * self.parameters.get("max_position_pct", 1.0)
+        # Use available cash, not total portfolio value — open positions tie up capital
+        available_cash = float(self.get_cash() or 0)
+        max_pct        = self.parameters.get("max_position_pct", 1.0)
+        total_pool     = min(self.portfolio_value * max_pct, available_cash)
         if not candidates:
             return {}
         if len(candidates) == 1:
