@@ -736,7 +736,7 @@ class TrendFilteredORB(Strategy):
             self.sleeptime = "2M"
         if in_orb and not self._in_orb_window:
             self._in_orb_window = True
-            self.log_message("ORB window open (9:45-10:30 AM)")
+            self.log_message("ORB window open (9:45-10:45 AM)")
         elif not in_orb and self._in_orb_window:
             self._in_orb_window = False
             if not self._positions:
@@ -746,18 +746,20 @@ class TrendFilteredORB(Strategy):
 
         eod_h, eod_m = map(int, self.parameters["eod_exit_time"].split(":"))
 
-        # Skip iterations after ORB window if no positions - nothing to do
-        # until EOD close at 3:50 PM.
-        # IMPORTANT: never skip if we have open positions - must reach EOD close.
+        # After ORB window closes:
+        #   - If NO positions: sleep until EOD (nothing to do)
+        #   - If positions open: keep checking every 2 min for stop/trail/EM
+        # IMPORTANT: never skip if we have open positions — must reach EOD close.
         if not in_orb and not self._positions:
             if now.time() < dtime(eod_h, eod_m):
-                return  # nothing to do until EOD
+                return  # no position, nothing to do until EOD close
         at_eod = now.time() >= dtime(eod_h, eod_m)
 
         if at_eod:
-            # Force-close all leveraged positions — still market hours at 3:50
-            self._close_leveraged_positions("EOD")
-            return  # nothing else to do after EOD close
+            if self._positions:
+                # Force-close all leveraged positions — still market hours at 3:50
+                self._close_leveraged_positions("EOD")
+            return  # nothing to do after EOD (with or without positions)
 
 
         if (os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() != "true" and
@@ -773,17 +775,27 @@ class TrendFilteredORB(Strategy):
             max_pos    = self.parameters["max_positions"]
             slots_free = max_pos - len(self._positions)
 
+            self.log_message(
+                f"[ORB] {now.strftime('%H:%M')} | "                f"slots: {slots_free}/{max_pos} | "                f"cash: ${self.get_cash():,.0f} | "                f"positions: {list(self._positions.keys()) or 'none'}"
+            )
             if slots_free > 0:
                 candidates = []
+                skipped    = []
                 for symbol in self._load_symbols():
                     if symbol in self._traded_today:
+                        skipped.append(f"{symbol}(already traded)")
                         continue
                     try:
                         c = self._process_symbol(symbol, now, today)
                         if c is not None:
                             candidates.append(c)
+                        # _process_symbol returns None for many reasons —
+                        # the detailed skip reasons are now logged inside it
                     except Exception as e:
-                        self.log_message(f"Error {symbol}: {e}")
+                        self.log_message(f"[ORB] ERROR {symbol}: {e}")
+
+                if skipped:
+                    self.log_message(f"[ORB] Skipped: {', '.join(skipped)}")
 
                 if candidates:
                     candidates.sort(key=lambda x: x["conviction"], reverse=True)
@@ -791,8 +803,7 @@ class TrendFilteredORB(Strategy):
                         f"{c['symbol']}({c['conviction']:.0f})" for c in candidates
                     )
                     self.log_message(
-                        f"Candidates [{len(candidates)}] ranked: {ranked_log} | "
-                        f"slots free: {slots_free}/{max_pos}"
+                        f"[ORB] Candidates [{len(candidates)}] ranked: {ranked_log} | "                        f"slots free: {slots_free}/{max_pos}"
                     )
                     # Conviction-weighted capital allocation across candidates
                     top_candidates = candidates[:slots_free]
@@ -800,6 +811,9 @@ class TrendFilteredORB(Strategy):
                     executed = 0
                     for c in top_candidates:
                         if executed >= slots_free or len(self._positions) >= max_pos:
+                            self.log_message(
+                                f"[ORB] SKIP {c['symbol']} — no slots left "                                f"({len(self._positions)}/{max_pos} positions open)"
+                            )
                             break
                         c["allocated_capital"] = capital_alloc.get(
                             c["symbol"],
@@ -807,6 +821,12 @@ class TrendFilteredORB(Strategy):
                         )
                         self._execute_candidate(c)
                         executed += 1
+                else:
+                    self.log_message("[ORB] No candidates this iteration")
+            else:
+                self.log_message(
+                    f"[ORB] All {max_pos} slots filled — "                    f"positions: {list(self._positions.keys())}"
+                )
 
     #  Broker Position Sync 
 
@@ -1308,6 +1328,8 @@ class TrendFilteredORB(Strategy):
         """
         bias   = self._daily_bias.get(symbol, {"action": "HOLD"})
         action = bias.get("action", "HOLD")
+        bull_score = bias.get("bull_score", 0)
+        bear_score = bias.get("bear_score", 0)
 
         hold_bias = (action == "HOLD")
         want_bull = action in ("BUY", "STRONG_BUY")
@@ -1316,11 +1338,17 @@ class TrendFilteredORB(Strategy):
         pair   = get_leveraged_pair(symbol)
         direct = is_direct_trade(symbol)
 
+        self.log_message(
+            f"[ORB] {symbol}: bias={action} bull={bull_score} bear={bear_score}"
+        )
+
         # SELL signal + no inverse ETF -> skip
         if want_bear and direct:
+            self.log_message(f"[ORB] {symbol}: SKIP — SELL signal but no inverse ETF available")
             return None
 
         if not want_bull and not hold_bias and not want_bear:
+            self.log_message(f"[ORB] {symbol}: SKIP — action={action} not tradeable")
             return None
 
         # Earnings filter
@@ -1400,25 +1428,40 @@ class TrendFilteredORB(Strategy):
         is_upside    = current > state["or_high"] * (1 + min_breakout)
         is_downside  = current < state["or_low"]  * (1 - min_breakout)
 
+        self.log_message(
+            f"[ORB] {symbol}: price={current:.2f} | "            f"OR=[{state['or_low']:.2f}–{state['or_high']:.2f}] | "            f"upside={'YES ✓' if is_upside else f'no ({(current/state["or_high"]-1)*100:+.2f}% vs +{min_breakout*100:.1f}% needed)'} | "            f"downside={'YES ✓' if is_downside else f'no ({(current/state["or_low"]-1)*100:+.2f}% vs -{min_breakout*100:.1f}% needed)'}"        )
+
         # Determine direction and exec ticker
         if want_bull and is_upside:
             is_inverse  = False
             exec_ticker = pair["bull"] if not direct else symbol
+            self.log_message(f"[ORB] {symbol}: BREAKOUT UP ✓ → will trade {exec_ticker}")
         elif want_bear and is_downside:
             is_inverse  = True
             exec_ticker = pair["bear"]
+            self.log_message(f"[ORB] {symbol}: BREAKOUT DOWN ✓ → will trade {exec_ticker}")
         elif hold_bias and is_upside:
             is_inverse  = False
             exec_ticker = pair["bull"] if not direct else symbol
+            self.log_message(f"[ORB] {symbol}: HOLD-BIAS breakout up ✓ → will trade {exec_ticker} (0.5x size)")
         else:
+            if want_bull:
+                self.log_message(f"[ORB] {symbol}: NO BREAKOUT — BUY bias but price {current:.2f} hasn't cleared OR high {state['or_high']:.2f}")
+            elif want_bear:
+                self.log_message(f"[ORB] {symbol}: NO BREAKOUT — SELL bias but price {current:.2f} hasn't broken OR low {state['or_low']:.2f}")
+            else:
+                self.log_message(f"[ORB] {symbol}: NO BREAKOUT — HOLD bias, waiting for upside breakout")
             return None  # No valid breakout
 
         # Block opposing position
         if exec_ticker in self._positions:
+            self.log_message(f"[ORB] {symbol}: SKIP — {exec_ticker} already in positions")
             return None
         if is_inverse and pair.get("bull") in self._positions:
+            self.log_message(f"[ORB] {symbol}: SKIP — bull ETF {pair.get('bull')} already held, won't add inverse")
             return None
         if not is_inverse and pair.get("bear") in self._positions:
+            self.log_message(f"[ORB] {symbol}: SKIP — bear ETF {pair.get('bear')} already held, won't add bull")
             return None
 
         #  AI grading 
@@ -1437,12 +1480,14 @@ class TrendFilteredORB(Strategy):
                 current_price=current, avg_volume=avg_vol,
             )
 
-        ai_min = self.parameters.get("ai_min_confidence", 0.55)
-        if grading["confidence"] < ai_min or not grading.get("approve", True):
-            self.log_message(
-                f"SKIP {symbol} - AI {grading['confidence']:.2f} | "
-                f"{grading.get('reasoning','')[:80]}"
-            )
+        ai_conf = grading["confidence"]
+        ai_min  = self.parameters.get("ai_min_confidence", 0.55)
+        self.log_message(
+            f"[ORB] {symbol}: AI conf={ai_conf:.2f} (min={ai_min:.2f}) | "            f"approved={grading.get('approve', True)} | "            f"size_mult={grading.get('size_multiplier', 1.0):.1f}x | "            f"{grading.get('reasoning','')[:60]}"
+        )
+        if ai_conf < ai_min or not grading.get("approve", True):
+            reason = f"confidence {ai_conf:.2f} < {ai_min:.2f}" if ai_conf < ai_min else "AI rejected"
+            self.log_message(f"[ORB] {symbol}: SKIP — {reason}")
             return None
 
         #  Sizing 
