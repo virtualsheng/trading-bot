@@ -74,7 +74,7 @@ def main():
         # ── Position limits ($2k cash account) ───────────────────────────
         # 1 position max (QQQ only). PDT rule does not apply (cash account).
         # T+1 settlement: fine for 1 trade per day.
-        "max_positions":      2,    # 1 per symbol: QQQ and SMH
+        "max_positions":      3,    # 1 per symbol: QQQ, SMH, USO
         "max_position_pct":   1.0,    # 40% = ~$800 (~24 TQQQ shares at $33)
 
         # ── Size guards ───────────────────────────────────────────────────

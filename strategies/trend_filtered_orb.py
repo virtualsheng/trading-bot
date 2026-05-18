@@ -471,7 +471,8 @@ logger = logging.getLogger(__name__)
 # Signal symbols the bot monitors. Execution ETFs come from leverage_map.py.
 # QQQ -> TQQQ (bull) / SQQQ (bear)   Nasdaq-100 3x
 # SMH -> SOXL (bull) / SOXS (bear)   Semiconductor 3x
-SIGNAL_SYMBOLS = ["QQQ", "SMH"]
+# USO  → UCO (bull) / SCO (bear)   Oil 2x
+SIGNAL_SYMBOLS = ["QQQ", "SMH", "USO"]
 SIGNAL_SYMBOL  = SIGNAL_SYMBOLS[0]   # legacy compat - primary signal for logging
 BIAS_CACHE          = "cache/daily_bias.json"
 BIAS_CACHE_BACKTEST = "cache/daily_bias_backtest.json"
@@ -488,7 +489,7 @@ ORB_ENTRY_END   = dtime(10, 30)  # 10:30 AM cutoff - late ORB entries have lower
 
 # All execution tickers - derived from leverage_map so adding a new symbol
 # to LEVERAGE_MAP automatically includes its ETFs here.
-LEVERAGED_TICKERS = get_all_exec_tickers()   # {"TQQQ","SQQQ","SOXL","SOXS"}
+LEVERAGED_TICKERS = get_all_exec_tickers()   # {"TQQQ","SQQQ","SOXL","SOXS","UCO","SCO"}
 
 
 def is_leveraged(ticker: str) -> bool:
@@ -507,7 +508,7 @@ class TrendFilteredORB(Strategy):
         "reward_ratio":              2.0,
         "eod_exit_time":             "15:50",   # 3:50 PM - close before PRELIM signals, guarantees market hours
         # Live defaults - backtest runner overrides these in PARAMS
-        "max_positions":             2,    # 2 trade at a time (QQQ, SMH)
+        "max_positions":             3,    # 3 trade at a time (QQQ, SMH, USO)
         "ai_min_confidence":         0.55,
         "hold_override":             False,
         "hold_override_size":        0.5,
@@ -610,8 +611,8 @@ class TrendFilteredORB(Strategy):
         print("[startup] Pre-warming earnings cache...")
         try:
             from strategies.earnings_filter import prefetch_earnings
-            ETF_SYMBOLS = {"QQQ", "SMH", "SPY", "IWM", "DIA", "XLK", "XLF",
-                           "TQQQ", "SQQQ", "SOXL", "SOXS"}
+            ETF_SYMBOLS = {"QQQ", "SMH", "SPY", "USO", "DIA", "XLK", "XLF",
+                           "TQQQ", "SQQQ", "SOXL", "SOXS", "UCO", "SCO"}
             # Only prefetch for non-ETF symbols - ETFs have no earnings
             non_etf = [s for s in self._load_symbols() if s.upper() not in ETF_SYMBOLS]
             if non_etf:
@@ -1343,8 +1344,8 @@ class TrendFilteredORB(Strategy):
         # Earnings filter
         # ETFs never have earnings - skip the check entirely
         # QQQ and SMH are ETFs; earnings filter only applies to individual stocks
-        ETF_SYMBOLS = {"QQQ", "SMH", "SPY", "IWM", "DIA", "XLK", "XLF",
-                       "TQQQ", "SQQQ", "SOXL", "SOXS"}
+        ETF_SYMBOLS = {"QQQ", "SMH", "SPY", "USO", "DIA", "XLK", "XLF",
+                       "TQQQ", "SQQQ", "SOXL", "SOXS", "UCO", "SCO"}
         if symbol.upper() not in ETF_SYMBOLS:
             try:
                 from strategies.earnings_filter import is_earnings_safe, get_earnings_info

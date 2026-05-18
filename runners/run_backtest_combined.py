@@ -46,8 +46,8 @@ from strategies.trend_filtered_orb import TrendFilteredORB
 # Free Polygon tier: data available from roughly 2 years ago to present.
 # Best down-market period available: Apr 2025 tariff crash + Iran War volatility.
 # Adjust START/END to the period you want to test.
-START            = datetime(2025, 2, 1)
-END              = datetime(2025, 5, 1)
+START            = datetime(2024, 5, 15)
+END              = datetime(2026, 5, 15)
 
 # Match your actual live account size for realistic position sizing validation.
 # risk_pct=0.10, max_position_pct=1.0 → fills account up to value cap.
@@ -57,7 +57,7 @@ CACHE_DIR        = "cache"
 # ── Signal symbols — mirrors live account ────────────────────────────────────
 # QQQ → TQQQ (bull) / SQQQ (bear)
 # SMH → SOXL (bull) / SOXS (bear)
-TICKERS = ["QQQ", "TQQQ", "SQQQ", "SMH", "SOXL", "SOXS"]
+TICKERS = ["QQQ", "TQQQ", "SQQQ", "SMH", "SOXL", "SOXS", "USO", "UCO", "SCO"]
 
 # ── Backtest-specific parameters ────────────────────────────────────────────
 # These OVERRIDE the strategy's live defaults for the backtest run only.
@@ -74,7 +74,7 @@ PARAMS = {
     # 2 positions max — one per symbol (QQQ and SMH).
     # Capital split proportional to conviction score at entry time.
     # max_position_pct=1.0 → full account deployable across positions.
-    "max_positions":      2,
+    "max_positions":      3,
     "max_position_pct":   1.0,
 
     # ── AI / signal ─────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ Trading bot signal symbols and their 3× leveraged execution ETFs:
 
   QQQ  → TQQQ (bull) / SQQQ (bear)   Nasdaq-100 3×
   SMH  → SOXL (bull) / SOXS (bear)   Semiconductor 3×
+  USO  → UCO (bull) / SCO (bear)   Oil 2x 
 
 Structure:
     LEVERAGE_MAP[signal_symbol] = {
@@ -30,6 +31,13 @@ LEVERAGE_MAP = {
         "leverage": 3,
         "note":     "Semiconductor 3× — Direxion Daily Semiconductor Bull/Bear 3×",
     },
+    "USO": {
+        "bull":     "UCO",
+        "bear":     "SCO",
+        "leverage": 3,
+        "note":     "Oil 2× — ProShares Ultra Bloomberg Crude Oil Bull/Bear 2×",
+    },
+
 }
 
 
@@ -61,7 +69,7 @@ def get_all_signal_symbols() -> list[str]:
 
 
 def get_all_exec_tickers() -> set[str]:
-    """All execution tickers (TQQQ, SQQQ, SOXL, SOXS) — used for EOD forced close."""
+    """All execution tickers (TQQQ, SQQQ, SOXL, SOXS, UCO, SCO) — used for EOD forced close."""
     tickers = set()
     for pair in LEVERAGE_MAP.values():
         tickers.add(pair["bull"])
