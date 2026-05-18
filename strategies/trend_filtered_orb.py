@@ -1492,7 +1492,7 @@ class TrendFilteredORB(Strategy):
         # Detect leverage multiple from exec_ticker name (2x or 3x)
         # Used to scale min_stop_pct so 3x ETFs get a wider stop floor.
         _et = exec_ticker.upper()
-        if any(_et.startswith(p) for p in ("TQQQ","SQQQ","SPXS","SOXL","SOXS",
+        if any(_et.startswith(p) for p in ("TQQQ","SQQQ","SPXL","SPXS","SOXL","SOXS",
                                             "UPRO","SPXU","FAS","FAZ","ERX","ERY",
                                             "JNUG","JDST","BITU","BITI",
                                             "NVDL","NVDD","TSMU","PTIR","AGQ","ZSL")):

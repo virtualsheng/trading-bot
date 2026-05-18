@@ -1,20 +1,22 @@
 """
 run_live_combined.py — Trend-Filtered ORB Strategy
 ────────────────────────────────────────────────────
-Single-symbol ORB intraday bot for a $2,000 Alpaca CASH account.
+3-symbol ORB intraday bot for a $2,000 Alpaca CASH account.
 
-  Signal symbol : QQQ
-  Bull execution: TQQQ (3× Nasdaq bull)
-  Bear execution: SQQQ (3× Nasdaq bear)
-  1 trade per day — re-entry blocked after STOP or target passed
-  Trail stop (2%) + EOD close at 3:45 PM handle all exits
+  Signal symbols : QQQ, SMH, USO
+  QQQ  -> TQQQ (bull) / SQQQ (bear)   Nasdaq-100 3x
+  SMH  -> SOXL (bull) / SOXS (bear)   Semiconductor 3x
+  USO  -> UCO  (bull) / SCO  (bear)   Oil 2x
+
+  1 trade per symbol per day — re-entry blocked after STOP
+  Trail stop (2%) + EOD close at 3:50 PM handle all exits
   Stop arms 15 min after entry (protects against early wicks)
   Stop at OR low (textbook ORB placement)
 
 ACCOUNT NOTES:
   Use Alpaca CASH account — not margin.
   PDT rule (25k minimum on margin) does not apply to cash accounts.
-  T+1 settlement is fine for 1 trade per day.
+  T+1 settlement: all leveraged ETFs close EOD so funds settle overnight.
 
 Switch paper/live: set ALPACA_IS_PAPER=true/false in .env
 """
@@ -67,15 +69,15 @@ def main():
         # ── Core ORB ──────────────────────────────────────────────────────
         "orb_minutes":        15,
         "bar_minutes":        5,
-        "risk_pct":           0.10,    # 2% risk = $40 on $2k account
+        "risk_pct":           0.10,    # 10% max loss per trade = $200 on $2k
         "reward_ratio":       2.0,     # 2:1 reference (~$80 target)
-        "eod_exit_time":      "15:50",   # 3:50 PM - close at market hours   # 3:56 PM — maximize gains
+        "eod_exit_time":      "15:50",   # 3:50 PM - close at market hours
 
         # ── Position limits ($2k cash account) ───────────────────────────
-        # 1 position max (QQQ only). PDT rule does not apply (cash account).
-        # T+1 settlement: fine for 1 trade per day.
-        "max_positions":      3,    # 1 per symbol: QQQ, SMH, USO
-        "max_position_pct":   1.0,    # 40% = ~$800 (~24 TQQQ shares at $33)
+        # Up to 3 concurrent positions — 1 per signal symbol (QQQ, SMH, USO).
+        # Capital split proportional to conviction when multiple signals fire.
+        "max_positions":      3,
+        "max_position_pct":   1.0,    # full account deployable across positions
 
         # ── Size guards ───────────────────────────────────────────────────
         "min_stop_pct":       0.005,   # floor, scaled ×3 = 1.5% for TQQQ/SQQQ
@@ -117,7 +119,7 @@ def main():
     sentiment_configured = bool(os.getenv("SENTIMENT_ADMIN_TOKEN", ""))
 
     print("\n" + "=" * 65)
-    print("  🚀  TREND-FILTERED ORB — QQQ INTRADAY BOT")
+    print("  🚀  TREND-FILTERED ORB — QQQ + SMH + USO INTRADAY BOT")
     print("=" * 65)
     print(f"  Mode              : {mode}")
     print(f"  Account type      : CASH (PDT rule does not apply)")
@@ -145,11 +147,11 @@ def main():
           f"({'token set ✅' if sentiment_configured else 'no token ⚠️'})")
     print("=" * 65)
     print()
-    print("  Trade model:")
-    print("  • QQQ BUY signal  → BUY TQQQ (3× Nasdaq bull)")
-    print("  • QQQ SELL signal → BUY SQQQ (3× Nasdaq bear)")
-    print("  • QQQ HOLD signal → BUY TQQQ on upside breakout (0.5× size)")
-    print("  • 1 trade/day max — re-entry blocked after STOP or target passed")
+    print("  Trade model (per symbol, 1 trade/day each):")
+    print("  • QQQ BUY  -> TQQQ | QQQ SELL -> SQQQ | QQQ HOLD -> TQQQ (0.5x)")
+    print("  • SMH BUY  -> SOXL | SMH SELL -> SOXS | SMH HOLD -> SOXL (0.5x)")
+    print("  • USO BUY  -> UCO  | USO SELL -> SCO  | USO HOLD -> UCO  (0.5x)")
+    print("  • Re-entry blocked after STOP — 1 trade per symbol per session")
     print()
     print("  Exit logic (trail-only):")
     print("  • First 15 min: stop INACTIVE (stop_delay_minutes=15)")
@@ -169,8 +171,8 @@ def main():
     print("  • 3:50 PM ET      — PRELIM EOD signals")
     print("  • ~4:05 PM ET     — FINAL EOD signals (after_market_closes)")
     print()
-    print("  ⚠️  CASH ACCOUNT: funds settle T+1 after each trade.")
-    print("      1 trade/day — funds available again next morning.")
+    print("  ⚠️  CASH ACCOUNT: all leveraged ETFs close by 3:50 PM daily.")
+    print("      Funds settle T+1 — available again next morning.")
     print()
     print("  To stop: Ctrl+C")
     print("=" * 65 + "\n")

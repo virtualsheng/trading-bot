@@ -91,6 +91,7 @@ PARAMS = {
     "target_exit":        False,  # let trail + EOD handle exit
     "target_scale_out":   1.0,    # unused when target_exit=False
     "trail_stop_pct":     0.02,   # 2% trailing stop
+    "em_boundary_exit":   False,  # skip in backtest - no historical options data
 
     # ── Breakout filter ──────────────────────────────────────────────────────
     "min_breakout_pct":   0.001,  # price must clear OR high by at least 0.1%
