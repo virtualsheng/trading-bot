@@ -483,7 +483,7 @@ MARKET_CLOSE_TIME = dtime(16, 25)
 
 # ORB entry window - 2-min iterations during this window
 ORB_ENTRY_START = dtime(9, 45)
-ORB_ENTRY_END   = dtime(10, 30)  # 10:30 AM cutoff - late ORB entries have lower win rates
+ORB_ENTRY_END   = dtime(10, 45)  # 10:45 AM cutoff - late ORB entries have lower win rates
 
 # All execution tickers - derived from leverage_map so adding a new symbol
 # to LEVERAGE_MAP automatically includes its ETFs here.
@@ -768,7 +768,7 @@ class TrendFilteredORB(Strategy):
 
         self._monitor_open_positions()
 
-        #  ORB entries 9:45 AM - 10:30 AM 
+        #  ORB entries 9:45 AM - 10:45 AM 
         if in_orb:
             max_pos    = self.parameters["max_positions"]
             slots_free = max_pos - len(self._positions)

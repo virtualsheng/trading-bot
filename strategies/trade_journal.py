@@ -25,7 +25,11 @@ from datetime import datetime
 from typing import Optional
 
 
-DB_PATH = "cache/trade_journal.db"
+# Always resolve relative to the project root (parent of strategies/)
+# so the DB ends up in trading-bot/cache/ regardless of where the script is launched from.
+_STRATEGY_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_STRATEGY_DIR)
+DB_PATH = os.path.join(_PROJECT_ROOT, "cache", "trade_journal.db")
 
 
 class TradeJournal:
