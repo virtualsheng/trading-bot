@@ -504,7 +504,7 @@ class TrendFilteredORB(Strategy):
         "bar_minutes":               5,
         "risk_pct":                  0.10,   # max loss per trade as % of portfolio (10% = $200 on $2k)
         "reward_ratio":              2.0,
-        "eod_exit_time":             "15:50",   # 3:50 PM - close before PRELIM signals, guarantees market hours
+        "eod_exit_time":             "15:50",   # 3:50 PM - force close all leveraged positions
         # Live defaults - backtest runner overrides these in PARAMS
         "max_positions":             3,    # 3 trade at a time (QQQ, SMH, USO)
         "ai_min_confidence":         0.55,
@@ -744,14 +744,14 @@ class TrendFilteredORB(Strategy):
             else:
                 self.log_message("ORB window closed - monitoring open position every 2M")
 
+        eod_h, eod_m = map(int, self.parameters["eod_exit_time"].split(":"))
+
         # Skip iterations after ORB window if no positions - nothing to do
-        # until EOD signal runs at 3:50 PM.
+        # until EOD close at 3:50 PM.
         # IMPORTANT: never skip if we have open positions - must reach EOD close.
         if not in_orb and not self._positions:
-            if now.time() < dtime(SIGNAL_PRELIM_HOUR, SIGNAL_PRELIM_MINUTE):
-                return  # nothing to do - wait for EOD signals
-
-        eod_h, eod_m = map(int, self.parameters["eod_exit_time"].split(":"))
+            if now.time() < dtime(eod_h, eod_m):
+                return  # nothing to do until EOD
         at_eod = now.time() >= dtime(eod_h, eod_m)
 
         if at_eod:

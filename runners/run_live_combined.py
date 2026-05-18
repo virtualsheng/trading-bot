@@ -123,9 +123,10 @@ def main():
     print("=" * 65)
     print(f"  Mode              : {mode}")
     print(f"  Account type      : CASH (PDT rule does not apply)")
-    print(f"  Signal symbol     : QQQ")
-    print(f"  Bull execution    : TQQQ (3× Nasdaq bull)")
-    print(f"  Bear execution    : SQQQ (3× Nasdaq bear)")
+    print(f"  Signal symbols    : QQQ, SMH, USO")
+    print(f"  QQQ -> TQQQ/SQQQ  : Nasdaq-100 3x")
+    print(f"  SMH -> SOXL/SOXS  : Semiconductor 3x")
+    print(f"  USO -> UCO/SCO    : Oil 2x")
     print(f"  Max Positions     : {PARAMS['max_positions']} (one trade at a time)")
     print(f"  Max Pos Size      : {int(PARAMS['max_position_pct']*100)}% = "
           f"~$800 (~24 TQQQ shares at $33)")
