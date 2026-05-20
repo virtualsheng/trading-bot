@@ -570,7 +570,8 @@ class TrendFilteredORB(Strategy):
 
         self._orb_state   = {}
         self._positions   = {}
-        self._trade_ids   = {}
+        self._trade_ids             = {}
+        self._pending_notifications = {}  # ticker -> payload, fires on Alpaca fill
         self._traded_today = set()  # symbols traded today - blocks re-entry
         self._daily_bias = self._load_bias()
         self._journal    = TradeJournal()
@@ -879,6 +880,137 @@ class TrendFilteredORB(Strategy):
 
     #  Sell Signal Exit 
 
+    #  Actual Fill Price Tracking 
+
+    def on_filled(self, order):
+        """
+        Called by LumiBot when Alpaca confirms an order fill.
+        This is where we:
+          1. Update position entry_price / journal with actual fill price
+          2. Send the single notification email with ALL details including
+             actual Alpaca fill price, slippage, timestamp, and trade value.
+        No email is sent at order submission — only here after confirmation.
+        """
+        if order is None:
+            return
+        try:
+            ticker     = order.asset.symbol if hasattr(order, "asset") else str(order.symbol)
+            fill_price = float(order.avg_fill_price) if order.avg_fill_price else None
+            side       = getattr(order, "side", "")
+            qty_filled = int(order.quantity) if order.quantity else 0
+            fill_time  = self.get_datetime().strftime("%Y-%m-%d %H:%M:%S ET")
+
+            if fill_price is None or fill_price <= 0:
+                return
+
+            pending = self._pending_notifications.pop(ticker, None)
+
+            if side == "buy":
+                # Update position with actual fill price
+                if ticker in self._positions:
+                    pos       = self._positions[ticker]
+                    obs_price = pos.get("entry_price", fill_price)
+                    slippage  = fill_price - obs_price
+                    pos["entry_price"] = fill_price
+
+                    # Update journal
+                    trade_id = self._trade_ids.get(ticker)
+                    if trade_id:
+                        try: self._journal.update_entry_price(trade_id, fill_price)
+                        except Exception: pass
+
+                    trade_value = fill_price * qty_filled
+                    self.log_message(
+                        f"✅ FILLED BUY {ticker} {qty_filled}sh "
+                        f"@ ${fill_price:.4f} | "
+                        f"obs ${obs_price:.4f} | "
+                        f"slippage ${slippage:+.4f} | "
+                        f"value ${trade_value:,.2f} | {fill_time}"
+                    )
+
+                    # Send the single full notification with actual fill price
+                    if pending and pending.get("side") == "buy":
+                        c           = pending["c"]
+                        trade_type  = pending["trade_type"]
+                        # Rebuild HTML with actual fill price substituted in
+                        html = self._build_entry_html(
+                            c, qty_filled, fill_time, trade_value,
+                            actual_fill=fill_price, slippage=slippage,
+                        )
+                        obs = pending["obs_price"]
+                        msg = (
+                            f"{trade_type} | {pending['signal_sym']}→{ticker} "
+                            f"x{qty_filled} | "
+                            f"FILL: ${fill_price:.4f} (obs ${obs:.4f}, "
+                            f"slip ${slippage:+.4f}) | "
+                            f"Stop: ${c['initial_stop']:.2f} | "
+                            f"Target: ${c['initial_target']:.2f} | "
+                            f"AI: {c['grading']['confidence']:.0%} "
+                            f"({c['size_mult']:.1f}x) | "
+                            f"cv: {c['conviction']:.0f} | "
+                            f"value: ${trade_value:,.2f} | {fill_time}"
+                        )
+                        self._notify(
+                            f"TRADING BOT: 🟢 ENTRY FILLED: {ticker} ({trade_type}) "
+                            f"${fill_price:.2f}",
+                            msg, html_body=html
+                        )
+
+            elif side == "sell":
+                # Update journal with actual exit fill price
+                trade_id = self._trade_ids.get(ticker)
+                if trade_id:
+                    try: self._journal.update_exit_price(trade_id, fill_price)
+                    except Exception: pass
+
+                if pending and pending.get("side") == "sell":
+                    entry       = pending["entry"]
+                    qty_out     = pending["qty"]
+                    reason      = pending["reason"]
+                    obs_price   = pending["obs_price"]
+                    slippage    = fill_price - obs_price
+                    actual_pnl  = (fill_price - entry) * qty_out
+                    trade_value = fill_price * qty_out
+                    pnl_sign    = "+" if actual_pnl >= 0 else ""
+                    pnl_pct     = (fill_price / entry - 1) * 100 if entry > 0 else 0
+                    sig_sym     = pending.get("signal_sym", "")
+
+                    self.log_message(
+                        f"✅ FILLED SELL {ticker} {qty_out}sh "
+                        f"@ ${fill_price:.4f} | "
+                        f"obs ${obs_price:.4f} | "
+                        f"slip ${slippage:+.4f} | "
+                        f"actual PnL ${pnl_sign}{actual_pnl:.2f} ({pnl_pct:+.2f}%) | "
+                        f"value ${trade_value:,.2f} | {fill_time}"
+                    )
+
+                    reason_icon = {"STOP":"🛑","EM_TARGET":"🎯","EOD":"🕐",
+                                   "TARGET":"✅","TRAIL":"📈"}.get(reason,"📤")
+                    html = self._build_exit_html(
+                        exec_ticker=ticker, reason=reason,
+                        exit_price=fill_price, entry_price=entry,
+                        qty=qty_out, pnl=actual_pnl,
+                        timestamp=fill_time, trade_value=trade_value,
+                        signal_symbol=sig_sym,
+                        obs_price=obs_price, slippage=slippage,
+                    )
+                    msg = (
+                        f"CLOSED {ticker} ({reason}) | "
+                        f"FILL: ${fill_price:.4f} (obs ${obs_price:.4f}, "
+                        f"slip ${slippage:+.4f}) | "
+                        f"entry: ${entry:.4f} | qty: {qty_out} | "
+                        f"PnL: ${pnl_sign}{actual_pnl:.2f} ({pnl_pct:+.2f}%) | "
+                        f"value: ${trade_value:,.2f} | {fill_time}"
+                    )
+                    self._notify(
+                        f"TRADING BOT: {reason_icon} EXIT FILLED: {ticker} ({reason}) "
+                        f"${pnl_sign}{actual_pnl:.2f}",
+                        msg, html_body=html
+                    )
+
+        except Exception as e:
+            self.log_message(f"on_filled error: {e}")
+
     def _check_and_close_sell_signals(self, reason: str = "SELL_SIGNAL"):
         """
         Close positions when the underlying signal reverses.
@@ -999,30 +1131,55 @@ class TrendFilteredORB(Strategy):
                     self._close_single_position(exec_ticker, pos, "STOP", current)
                     continue
 
-                #  4. EM upper boundary exit 
-                # If price reaches the options-implied daily expected move upper
-                # boundary, the market has priced in its maximum expected move.
+                #  4. EM upper boundary exit (5-min candle close confirmation) 
+                # Only exits if a completed 5-min candle CLOSES above the EM upper
+                # boundary — avoids being stopped out on a wick that immediately
+                # reverses. A tick-touch without a candle close is ignored.
                 # Skipped in backtest: today's EM options prices don't apply to
                 # historical TQQQ/SQQQ prices from prior years.
-                em_exit    = self.parameters.get("em_boundary_exit", True)
+                em_exit     = self.parameters.get("em_boundary_exit", True)
                 is_backtest = os.getenv("LUMIBOT_BACKTEST_MODE","").lower() == "true"
-                if em_exit and _EM_AVAILABLE and not is_backtest and not pos.get("em_exit_checked", False):
+                if em_exit and _EM_AVAILABLE and not is_backtest:
                     try:
-                        sig_sym = pos.get("signal_symbol", "QQQ")
+                        sig_sym  = pos.get("signal_symbol", "QQQ")
                         em = get_expected_move(sig_sym)
                         if em:
-                            # Use exec_ticker upper bound
                             em_upper = em.get("exec_daily_upper", 0)
-                            if em_upper > 0 and current >= em_upper:
-                                pnl_now = (current - pos["entry_price"]) * pos.get("qty", 0)
-                                self.log_message(
-                                    f"EM BOUNDARY HIT {exec_ticker} @ ${current:.2f} "
-                                    f">= upper EM ${em_upper:.2f} "
-                                    f"| PnL: ${pnl_now:+.2f} - closing before EOD"
-                                )
-                                self._close_single_position(
-                                    exec_ticker, pos, "EM_TARGET", current)
-                                continue
+                            if em_upper > 0:
+                                if current < em_upper * 0.998:
+                                    # Well below boundary — reset any pending confirmation
+                                    pos.pop("em_candle_above", None)
+                                elif current >= em_upper:
+                                    # Price is at or above EM boundary on this tick
+                                    # Check if the last completed 5-min candle also
+                                    # closed above — requires two consecutive readings
+                                    candle_closed_above = False
+                                    try:
+                                        recent = self.get_historical_prices(exec_ticker, 2, "5m")
+                                        if recent is not None and len(recent.df) >= 1:
+                                            last_close = float(recent.df["close"].iloc[-1])
+                                            candle_closed_above = last_close >= em_upper
+                                    except Exception:
+                                        pass
+
+                                    if candle_closed_above:
+                                        pnl_now = (current - pos["entry_price"]) * pos.get("qty", 0)
+                                        self.log_message(
+                                            f"EM BOUNDARY HIT {exec_ticker} @ ${current:.2f} "
+                                            f"(5-min close ${last_close:.2f} >= EM ${em_upper:.2f}) "
+                                            f"| PnL: ${pnl_now:+.2f} — closing"
+                                        )
+                                        self._close_single_position(
+                                            exec_ticker, pos, "EM_TARGET", current)
+                                        continue
+                                    else:
+                                        # Tick touch but no candle close yet — log and wait
+                                        if not pos.get("em_candle_above"):
+                                            self.log_message(
+                                                f"EM BOUNDARY TOUCH {exec_ticker} @ ${current:.2f} "
+                                                f">= EM ${em_upper:.2f} — waiting for 5-min candle close"
+                                            )
+                                            pos["em_candle_above"] = True
                     except Exception:
                         pass
 
@@ -1085,14 +1242,37 @@ class TrendFilteredORB(Strategy):
             except Exception:
                 pass
 
-        o_tag   = "overnight" if pos.get("overnight_ok") else "intraday"
-        inv_tag = " [inverse]" if pos.get("is_inverse") else ""
-        msg     = (
-            f"CLOSED {exec_ticker}{inv_tag} ({reason}) @ {exit_price:.2f} | "
-            f"PnL: ${pnl:+.2f} | {o_tag}"
+        o_tag       = "overnight" if pos.get("overnight_ok") else "intraday"
+        inv_tag     = " [inverse]" if pos.get("is_inverse") else ""
+        entry       = pos.get("entry_price", 0)
+        qty_out     = pos.get("qty_remaining", pos.get("qty", 0))
+        est_pnl     = (exit_price - entry) * qty_out if entry > 0 and qty_out > 0 else pnl
+        trade_value = exit_price * qty_out
+        now_ts      = self.get_datetime().strftime("%Y-%m-%d %H:%M:%S ET")
+        sig_sym     = pos.get("signal_symbol", "")
+
+        pnl_color = "+" if est_pnl >= 0 else ""
+        msg = (
+            f"CLOSED {exec_ticker}{inv_tag} ({reason}) @ ${exit_price:.2f} (observed) | "
+            f"est. PnL: ${pnl_color}{est_pnl:.2f} | "
+            f"entry: ${entry:.4f} | qty: {qty_out} | "
+            f"value: ${trade_value:,.2f} | {o_tag} | {now_ts}"
         )
         self.log_message(msg)
-        self._notify(f"Trade-Bot: EXIT {exec_ticker}", msg)
+        # Store exit payload — email fires after Alpaca fill confirmation
+        self._pending_notifications[exec_ticker] = {
+            "side":       "sell",
+            "reason":     reason,
+            "obs_price":  exit_price,
+            "entry":      entry,
+            "qty":        qty_out,
+            "est_pnl":    est_pnl,
+            "timestamp":  now_ts,
+            "trade_value":trade_value,
+            "signal_sym": sig_sym,
+            "o_tag":      o_tag,
+            "inv_tag":    inv_tag,
+        }
 
         self._positions.pop(exec_ticker, None)
         self._trade_ids.pop(exec_ticker, None)
@@ -1791,29 +1971,242 @@ class TrendFilteredORB(Strategy):
             except Exception:
                 pass
 
+        now_ts      = self.get_datetime().strftime("%Y-%m-%d %H:%M:%S ET")
+        trade_value = qty * exec_current
         msg = (
             f"{trade_type} | {symbol}({signal_price:.2f})->{exec_ticker} x{qty} "
             f"@ {exec_current:.2f} | Stop:{c['initial_stop']:.2f} "
             f"Target:{c['initial_target']:.2f} | "
             f"AI:{grading['confidence']:.2f}({c['size_mult']:.1f}x) | "
             f"Conviction:{c['conviction']:.0f} | "
-            f"Regime:{regime.get('regime','?')}{inv_tag}{o_tag}{em_note}"
+            f"Regime:{regime.get('regime','?')}{inv_tag}{o_tag}{em_note} | "
+            f"Value:${trade_value:,.2f} | {now_ts}"
         )
         self.log_message(msg)
-        self._notify(f"Trade-Bot: BUY {exec_ticker} ({trade_type})", msg)
+        # Store notification payload — email fires after Alpaca fill confirmation
+        # so we can include the actual fill price instead of the observed price.
+        self._pending_notifications[exec_ticker] = {
+            "side":        "buy",
+            "c":           c,
+            "qty":         qty,
+            "obs_price":   exec_current,
+            "trade_type":  trade_type,
+            "timestamp":   now_ts,
+            "signal_sym":  symbol,
+        }
 
     #  Helpers 
 
-    def _notify(self, subject: str, body: str):
+    def _notify(self, subject: str, body: str, html_body: str = None):
         if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() == "true":
             return
         full = f"{subject}\n{body}"
-        try: send_email(subject, body)
+        try: send_email(subject, body, html_body=html_body)
         except Exception: pass
         try: send_discord_message(full)
         except Exception: pass
         try: send_telegram_message(full)
         except Exception: pass
+
+    def _build_entry_html(self, c: dict, qty: int, timestamp: str,
+                           trade_value: float,
+                           actual_fill: float = None,
+                           slippage: float = None) -> str:
+        """Build rich HTML email for entry notification (fires on Alpaca fill confirmation)."""
+        tt    = c["trade_type"]
+        sym   = c["symbol"]
+        etf   = c["exec_ticker"]
+        ep    = c["exec_current"]
+        # Actual fill values (set when called from on_filled)
+        fill_val     = actual_fill if actual_fill is not None else ep
+        fill_display = f"{fill_val:.4f}"
+        slip_val     = slippage if slippage is not None else 0.0
+        slip_color   = "#E24B4A" if slip_val > 0 else "#1D9E75" if slip_val < 0 else "#888"
+        slip_display = f"{slip_val:+.4f}"
+        stop  = c["initial_stop"]
+        tgt   = c["initial_target"]
+        ai    = c["grading"]["confidence"]
+        mult  = c["size_mult"]
+        cv    = c["conviction"]
+        reg   = c["regime"].get("regime", "?")
+        bias  = c["bias"].get("action", "?")
+        rsi   = c["bias"].get("rsi", 0)
+        vol   = c["bias"].get("vol_ratio", 1.0)
+        stop_dist_pct = abs(ep - stop) / ep * 100
+        tgt_dist_pct  = abs(tgt - ep) / ep * 100
+        rr            = tgt_dist_pct / stop_dist_pct if stop_dist_pct > 0 else 0
+
+        color     = "#1D9E75" if tt in ("BULL","HOLD-BIAS") else "#E24B4A"
+        reg_color = {"trending":"#1D9E75","volatile":"#BA7517",
+                     "ranging":"#888","unknown":"#888"}.get(reg, "#888")
+        is_paper  = os.getenv("ALPACA_IS_PAPER","true").lower() == "true"
+        mode_tag  = "📄 PAPER" if is_paper else "💵 LIVE"
+
+        return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+             max-width:520px;margin:0 auto;padding:16px;background:#fff;color:#2C2C2A">
+
+  <div style="border-left:4px solid {color};padding:10px 14px;
+              background:#FAFAF8;border-radius:0 8px 8px 0;margin-bottom:16px">
+    <div style="font-size:11px;color:#888;text-transform:uppercase;
+                letter-spacing:0.5px;margin-bottom:4px">{mode_tag} · {timestamp}</div>
+    <div style="font-size:22px;font-weight:600;color:{color}">{tt}</div>
+    <div style="font-size:16px;font-weight:500;margin-top:2px">
+      {sym} → {etf}
+    </div>
+  </div>
+
+  <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
+    <tr style="background:#F1EFE8">
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A;width:45%">Shares ordered</td>
+      <td style="padding:8px 10px;font-weight:600">{qty} × {etf}</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A;border-top:0.5px solid #E8E6DF">
+        Alpaca fill price</td>
+      <td style="padding:8px 10px;border-top:0.5px solid #E8E6DF;font-weight:600;color:#1D9E75">
+        ${fill_display}</td>
+    </tr>
+    <tr style="background:#F1EFE8">
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A">Observed price</td>
+      <td style="padding:8px 10px;color:#888">${ep:.4f}</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A;border-top:0.5px solid #E8E6DF">
+        Slippage</td>
+      <td style="padding:8px 10px;border-top:0.5px solid #E8E6DF;color:{slip_color}">
+        ${slip_display}</td>
+    </tr>
+    <tr style="background:#F1EFE8">
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A">Trade value (actual)</td>
+      <td style="padding:8px 10px;font-weight:600">${trade_value:,.2f}</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A;border-top:0.5px solid #E8E6DF">
+        Stop loss</td>
+      <td style="padding:8px 10px;border-top:0.5px solid #E8E6DF;color:#E24B4A;font-weight:500">
+        ${stop:.2f} <span style="color:#888;font-weight:400">(-{stop_dist_pct:.1f}%)</span></td>
+    </tr>
+    <tr style="background:#F1EFE8">
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A">Target (reference)</td>
+      <td style="padding:8px 10px;color:#1D9E75;font-weight:500">
+        ${tgt:.2f} <span style="color:#888;font-weight:400">(+{tgt_dist_pct:.1f}%)</span></td>
+    </tr>
+    <tr>
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A;border-top:0.5px solid #E8E6DF">
+        Risk:Reward</td>
+      <td style="padding:8px 10px;border-top:0.5px solid #E8E6DF">{rr:.1f}:1</td>
+    </tr>
+  </table>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+    <div style="background:#F1EFE8;border-radius:6px;padding:8px 12px;flex:1;min-width:100px">
+      <div style="font-size:10px;color:#888;text-transform:uppercase;margin-bottom:2px">Conviction</div>
+      <div style="font-size:16px;font-weight:600">{cv:.0f}/100</div>
+    </div>
+    <div style="background:#F1EFE8;border-radius:6px;padding:8px 12px;flex:1;min-width:100px">
+      <div style="font-size:10px;color:#888;text-transform:uppercase;margin-bottom:2px">AI Confidence</div>
+      <div style="font-size:16px;font-weight:600">{ai:.0%} <span style="font-size:12px;font-weight:400;color:#888">{mult:.1f}x</span></div>
+    </div>
+    <div style="background:#F1EFE8;border-radius:6px;padding:8px 12px;flex:1;min-width:100px">
+      <div style="font-size:10px;color:#888;text-transform:uppercase;margin-bottom:2px">Regime</div>
+      <div style="font-size:14px;font-weight:600;color:{reg_color}">{reg}</div>
+    </div>
+  </div>
+
+  <div style="background:#F7F5EE;border-radius:6px;padding:10px 12px;
+              font-size:12px;color:#5F5E5A;margin-bottom:12px">
+    <strong>Signal:</strong> {bias} &nbsp;|&nbsp;
+    <strong>RSI:</strong> {rsi:.1f} &nbsp;|&nbsp;
+    <strong>Volume:</strong> {vol:.2f}x avg &nbsp;|&nbsp;
+    <strong>Signal symbol:</strong> {sym} @ ${c['current']:.2f}
+  </div>
+
+  <div style="font-size:11px;color:#888;border-top:0.5px solid #E8E6DF;padding-top:8px">
+    ✅ Confirmed Alpaca fill. Stop becomes active after {'{stop_delay}'} min.
+  </div>
+</body></html>""".replace("{stop_delay}", str(self.parameters.get("stop_delay_minutes", 15)))
+
+    def _build_exit_html(self, exec_ticker: str, reason: str, exit_price: float,
+                          entry_price: float, qty: int, pnl: float,
+                          timestamp: str, trade_value: float,
+                          signal_symbol: str = "",
+                          obs_price: float = None,
+                          slippage: float = None) -> str:
+        """Build rich HTML email for exit notification (fires on Alpaca fill confirmation)."""
+        pnl_color    = "#1D9E75" if pnl >= 0 else "#E24B4A"
+        pnl_pct      = (exit_price / entry_price - 1) * 100 if entry_price > 0 else 0
+        slip_val     = slippage if slippage is not None else 0.0
+        obs_val      = obs_price if obs_price is not None else exit_price
+        slip_color   = "#E24B4A" if slip_val > 0 else "#1D9E75" if slip_val < 0 else "#888"
+        obs_row      = (
+            f'<tr><td style="padding:8px 10px;font-weight:500;color:#5F5E5A">'
+            f'Observed price</td>'
+            f'<td style="padding:8px 10px;color:#888">${obs_val:.4f} '
+            f'<span style="color:{slip_color}">({slip_val:+.4f} slip)</span></td></tr>'
+        ) if obs_price is not None else ""
+        reason_color = {"STOP":"#E24B4A","EM_TARGET":"#1D9E75",
+                        "EOD":"#888","TARGET":"#1D9E75","TRAIL":"#1D9E75"}.get(reason,"#888")
+        reason_icon  = {"STOP":"🛑","EM_TARGET":"🎯","EOD":"🕐",
+                        "TARGET":"✅","TRAIL":"📈"}.get(reason,"📤")
+        is_paper     = os.getenv("ALPACA_IS_PAPER","true").lower() == "true"
+        mode_tag     = "📄 PAPER" if is_paper else "💵 LIVE"
+
+        return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+             max-width:520px;margin:0 auto;padding:16px;background:#fff;color:#2C2C2A">
+
+  <div style="border-left:4px solid {pnl_color};padding:10px 14px;
+              background:#FAFAF8;border-radius:0 8px 8px 0;margin-bottom:16px">
+    <div style="font-size:11px;color:#888;text-transform:uppercase;
+                letter-spacing:0.5px;margin-bottom:4px">{mode_tag} · {timestamp}</div>
+    <div style="font-size:22px;font-weight:600;color:{reason_color}">
+      {reason_icon} {reason}</div>
+    <div style="font-size:16px;font-weight:500;margin-top:2px">{exec_ticker}
+      {f'<span style="color:#888;font-size:13px;font-weight:400"> (signal: {signal_symbol})</span>' if signal_symbol else ""}
+    </div>
+  </div>
+
+  <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
+    <tr style="background:#F1EFE8">
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A;width:45%">Shares sold</td>
+      <td style="padding:8px 10px;font-weight:600">{qty} × {exec_ticker}</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A;border-top:0.5px solid #E8E6DF">
+        Alpaca fill price</td>
+      <td style="padding:8px 10px;border-top:0.5px solid #E8E6DF;font-weight:600;color:#1D9E75">
+        ${exit_price:.4f}</td>
+    </tr>
+    {obs_row}
+    <tr style="background:#F1EFE8">
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A">Entry price</td>
+      <td style="padding:8px 10px">${entry_price:.4f}</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A;border-top:0.5px solid #E8E6DF">
+        Trade value (actual)</td>
+      <td style="padding:8px 10px;border-top:0.5px solid #E8E6DF">${trade_value:,.2f}</td>
+    </tr>
+    <tr style="background:#F1EFE8">
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A">Est. P&L</td>
+      <td style="padding:8px 10px;font-weight:700;font-size:16px;color:{pnl_color}">
+        ${pnl:+,.2f} <span style="font-size:13px;font-weight:400">({pnl_pct:+.2f}%)</span></td>
+    </tr>
+    <tr>
+      <td style="padding:8px 10px;font-weight:500;color:#5F5E5A;border-top:0.5px solid #E8E6DF">
+        Exit reason</td>
+      <td style="padding:8px 10px;border-top:0.5px solid #E8E6DF;
+                  color:{reason_color};font-weight:500">{reason_icon} {reason}</td>
+    </tr>
+  </table>
+
+  <div style="font-size:11px;color:#888;border-top:0.5px solid #E8E6DF;padding-top:8px">
+    ✅ Confirmed Alpaca fill.
+  </div>
+</body></html>"""
 
     def _load_symbols(self) -> list:
         # Returns all signal symbols from the leverage map.

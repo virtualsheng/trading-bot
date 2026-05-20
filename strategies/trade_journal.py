@@ -342,6 +342,32 @@ class TradeJournal:
             """, (exec_ticker,)).fetchone()
         return dict(row) if row else None
 
+    def update_entry_price(self, trade_id: int, fill_price: float):
+        """Update entry price with actual broker fill price."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE trades SET entry_price = ? WHERE id = ?",
+                (round(fill_price, 4), trade_id)
+            )
+            conn.commit()
+
+    def update_exit_price(self, trade_id: int, fill_price: float):
+        """Update exit price and recalculate PnL with actual broker fill price."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT entry_price, quantity FROM trades WHERE id = ?",
+                (trade_id,)
+            ).fetchone()
+            if row:
+                entry_price = row[0]
+                quantity    = row[1]
+                actual_pnl  = round((fill_price - entry_price) * quantity, 2)
+                conn.execute(
+                    "UPDATE trades SET exit_price = ?, pnl = ? WHERE id = ?",
+                    (round(fill_price, 4), actual_pnl, trade_id)
+                )
+                conn.commit()
+
     def get_stats(self, days: int = 30) -> dict:
         """Return performance stats for the last N days."""
         with self._connect() as conn:
