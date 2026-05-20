@@ -57,7 +57,7 @@ CACHE_DIR        = "cache"
 # ── Signal symbols — mirrors live account ────────────────────────────────────
 # QQQ → TQQQ (bull) / SQQQ (bear)
 # SMH → SOXL (bull) / SOXS (bear)
-TICKERS = ["QQQ", "TQQQ", "SQQQ", "SMH", "SOXL", "SOXS", "USO", "UCO", "SCO"]
+TICKERS = ["QQQ", "TQQQ", "SQQQ", "SMH", "SOXL", "SOXS"]
 
 # ── Backtest-specific parameters ────────────────────────────────────────────
 # These OVERRIDE the strategy's live defaults for the backtest run only.
@@ -74,7 +74,7 @@ PARAMS = {
     # 2 positions max — one per symbol (QQQ and SMH).
     # Capital split proportional to conviction score at entry time.
     # max_position_pct=1.0 → full account deployable across positions.
-    "max_positions":      3,
+    "max_positions":      2,
     "max_position_pct":   1.0,
 
     # ── AI / signal ─────────────────────────────────────────────────────────

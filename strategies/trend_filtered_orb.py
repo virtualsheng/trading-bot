@@ -472,7 +472,7 @@ logger = logging.getLogger(__name__)
 # QQQ -> TQQQ (bull) / SQQQ (bear)   Nasdaq-100 3x
 # SMH -> SOXL (bull) / SOXS (bear)   Semiconductor 3x
 # USO  → UCO (bull) / SCO (bear)   Oil 2x
-SIGNAL_SYMBOLS = ["QQQ", "SMH", "USO"]
+SIGNAL_SYMBOLS = ["QQQ", "SMH"]
 SIGNAL_SYMBOL  = SIGNAL_SYMBOLS[0]   # legacy compat - primary signal for logging
 BIAS_CACHE          = "cache/daily_bias.json"
 BIAS_CACHE_BACKTEST = "cache/daily_bias_backtest.json"
@@ -487,7 +487,7 @@ ORB_ENTRY_END   = dtime(10, 45)  # 10:45 AM cutoff - late ORB entries have lower
 
 # All execution tickers - derived from leverage_map so adding a new symbol
 # to LEVERAGE_MAP automatically includes its ETFs here.
-LEVERAGED_TICKERS = get_all_exec_tickers()   # {"TQQQ","SQQQ","SOXL","SOXS","UCO","SCO"}
+LEVERAGED_TICKERS = get_all_exec_tickers()   # {"TQQQ","SQQQ","SOXL","SOXS"}
 
 
 def is_leveraged(ticker: str) -> bool:
@@ -498,7 +498,7 @@ class TrendFilteredORB(Strategy):
 
     parameters = {
         "sleeptime_orb":             "2M",
-        "sleeptime_default":         "5M",
+        "sleeptime_default":         "2M",
         "after_close_delay_minutes": 5,
         "orb_minutes":               15,
         "bar_minutes":               5,
@@ -506,7 +506,7 @@ class TrendFilteredORB(Strategy):
         "reward_ratio":              2.0,
         "eod_exit_time":             "15:50",   # 3:50 PM - force close all leveraged positions
         # Live defaults - backtest runner overrides these in PARAMS
-        "max_positions":             3,    # 3 trade at a time (QQQ, SMH, USO)
+        "max_positions":             2,    # 2 trade at a time (QQQ, SMH)
         "ai_min_confidence":         0.55,
         "hold_override":             False,
         "hold_override_size":        0.5,
@@ -873,6 +873,50 @@ class TrendFilteredORB(Strategy):
                 self.log_message(
                     f"[ORB] All {max_pos} slots filled — "                    f"positions: {list(self._positions.keys())}"
                 )
+
+    #  Safe Capital Calculation 
+
+    def _get_safe_available_capital(self) -> float:
+        """
+        Get safe deployable capital from Alpaca's actual account balances.
+
+        For a cash account:
+          - Uses non_marginable_buying_power if available (most conservative)
+          - Falls back to cash, then portfolio_value
+
+        This prevents the bot from over-deploying on margin accounts or when
+        T+1 settlement hasn't cleared yet.
+
+        Returns a value capped at self.portfolio_value to prevent oversizing.
+        """
+        try:
+            account = self.broker.api.get_account()
+
+            # non_marginable_buying_power = settled cash only (no margin)
+            # This is the safest figure for a cash account
+            non_margin_bp = float(getattr(account, "non_marginable_buying_power", 0) or 0)
+            if non_margin_bp > 10:
+                self.log_message(
+                    f"[CAPITAL] non_marginable_bp=${non_margin_bp:,.2f} "
+                    f"portfolio=${self.portfolio_value:,.2f}"
+                )
+                # Cap at portfolio_value — non_marginable can be stale
+                return min(non_margin_bp, self.portfolio_value)
+
+            # Fallback: cash balance
+            cash = float(getattr(account, "cash", 0) or 0)
+            if cash > 10:
+                self.log_message(
+                    f"[CAPITAL] cash=${cash:,.2f} "
+                    f"(non_marginable_bp unavailable)"
+                )
+                return min(cash, self.portfolio_value)
+
+        except Exception as e:
+            self.log_message(f"[CAPITAL] Alpaca balance check failed: {e} — using get_cash()")
+
+        # Final fallback: LumiBot's get_cash()
+        return float(self.get_cash() or 0)
 
     #  Broker Position Sync 
 
@@ -1875,8 +1919,9 @@ class TrendFilteredORB(Strategy):
           QQQ weight = 83/(83+52) = 61.5% -> $1,230
           SMH weight = 52/(83+52) = 38.5% -> $  770
         """
-        # Use available cash, not total portfolio value — open positions tie up capital
-        available_cash = float(self.get_cash() or 0)
+        # Use safe available capital (non_marginable_buying_power from Alpaca)
+        # This uses settled cash only — prevents deploying on margin or unsettled funds
+        available_cash = self._get_safe_available_capital()
         max_pct        = self.parameters.get("max_position_pct", 1.0)
         total_pool     = min(self.portfolio_value * max_pct, available_cash)
         if not candidates:
@@ -1884,16 +1929,36 @@ class TrendFilteredORB(Strategy):
         if len(candidates) == 1:
             return {candidates[0]["symbol"]: total_pool}
 
-        total_cv   = sum(max(c.get("conviction", 50), 1) for c in candidates)
+        # Composite score: conviction × volume confirmation
+        # vol_ratio > 1.0 = above-average volume confirming the breakout
+        # Capped at 2.0 so volume can boost but not dominate a high-cv setup
+        # Floored at 0.5 so quiet symbols still get meaningful allocation
+        VOL_CAP = 2.0
+        VOL_MIN = 0.5
+        scores  = {}
+        for c in candidates:
+            cv         = max(float(c.get("conviction", 50)), 1.0)
+            vol_ratio  = float(c["bias"].get("vol_ratio", 1.0))
+            vol_factor = max(min(vol_ratio, VOL_CAP), VOL_MIN)
+            scores[c["symbol"]] = {
+                "cv":        cv,
+                "vol_ratio": vol_ratio,
+                "vol_factor":vol_factor,
+                "raw":       cv * vol_factor,
+            }
+
+        total_raw  = sum(s["raw"] for s in scores.values())
         allocation = {}
         for c in candidates:
-            cv     = max(c.get("conviction", 50), 1)
-            weight = cv / total_cv
-            alloc  = round(total_pool * weight, 2)
-            allocation[c["symbol"]] = alloc
+            sym   = c["symbol"]
+            s     = scores[sym]
+            pct   = s["raw"] / total_raw if total_raw > 0 else 1.0 / len(candidates)
+            alloc = round(total_pool * pct, 2)
+            allocation[sym] = alloc
             self.log_message(
-                f"  Allocation: {c['symbol']} cv={cv:.0f} -> "
-                f"{weight:.0%} = ${alloc:,.0f}"
+                f"  Allocation: {sym} cv={s['cv']:.0f} "
+                f"vol={s['vol_ratio']:.2f}x(×{s['vol_factor']:.1f}) "
+                f"score={s['raw']:.1f} ({pct:.0%}) = ${alloc:,.0f}"
             )
         return allocation
 
@@ -1914,8 +1979,13 @@ class TrendFilteredORB(Strategy):
 
         # Recalculate qty using conviction-weighted allocated_capital
         # (set by _allocate_capital before this call, may differ from _process_symbol estimate)
-        allocated_capital = c.get("allocated_capital",
-            self.portfolio_value * self.parameters.get("max_position_pct", 1.0))
+        # Use safe available capital — never let a single position exceed it
+        safe_cap          = self._get_safe_available_capital()
+        allocated_capital = min(
+            c.get("allocated_capital",
+                  self.portfolio_value * self.parameters.get("max_position_pct", 1.0)),
+            safe_cap   # hard cap: can't spend more than we have in settled cash
+        )
         risk_dollars  = self.portfolio_value * c.get("effective_risk", self.parameters["risk_pct"])
         stop_dist     = abs(exec_current - c["initial_stop"])
         if stop_dist > 0 and exec_current > 0:

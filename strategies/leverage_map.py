@@ -31,13 +31,13 @@ LEVERAGE_MAP = {
         "leverage": 3,
         "note":     "Semiconductor 3× — Direxion Daily Semiconductor Bull/Bear 3×",
     },
-    "USO": {
-        "bull":     "UCO",
-        "bear":     "SCO",
-        "leverage": 2,
-        "note":     "Oil 2× — ProShares Ultra Bloomberg Crude Oil Bull/Bear 2×",
-    },
-
+    # USO (UCO/SCO 2×) available but not active — add back to LEVERAGE_MAP to re-enable
+    # "USO": {
+    #     "bull":     "UCO",
+    #     "bear":     "SCO",
+    #     "leverage": 2,
+    #     "note":     "Oil 2× — ProShares Ultra Bloomberg Crude Oil Bull/Bear 2×",
+    # },
 }
 
 

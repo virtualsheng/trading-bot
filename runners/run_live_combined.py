@@ -3,10 +3,9 @@ run_live_combined.py — Trend-Filtered ORB Strategy
 ────────────────────────────────────────────────────
 3-symbol ORB intraday bot for a $2,000 Alpaca CASH account.
 
-  Signal symbols : QQQ, SMH, USO
+  Signal symbols : QQQ, SMH
   QQQ  -> TQQQ (bull) / SQQQ (bear)   Nasdaq-100 3x
   SMH  -> SOXL (bull) / SOXS (bear)   Semiconductor 3x
-  USO  -> UCO  (bull) / SCO  (bear)   Oil 2x
 
   1 trade per symbol per day — re-entry blocked after STOP
   Trail stop (2%) + EOD close at 3:50 PM handle all exits
@@ -58,6 +57,9 @@ def main():
         "API_KEY":    api_key,
         "API_SECRET": api_secret,
         "PAPER":      is_paper,
+        # IMPORTANT: prevents margin usage and PDT flags on accounts < $25k
+        # Alpaca paper accounts default to margin — this forces cash-only behaviour
+        "CASH_ONLY":  True,
     }
 
     PARAMS = {
@@ -73,9 +75,9 @@ def main():
         "eod_exit_time":      "15:50",   # 3:50 PM - close at market hours
 
         # ── Position limits ($2k cash account) ───────────────────────────
-        # Up to 3 concurrent positions — 1 per signal symbol (QQQ, SMH, USO).
-        # Capital split proportional to conviction when multiple signals fire.
-        "max_positions":      3,
+        # Up to 2 concurrent positions — 1 per signal symbol (QQQ, SMH).
+        # Capital split proportional to conviction when multiple signals fire simultaneously.
+        "max_positions":      2,
         "max_position_pct":   1.0,    # full account deployable across positions
 
         # ── Size guards ───────────────────────────────────────────────────
@@ -122,10 +124,9 @@ def main():
     print("=" * 65)
     print(f"  Mode              : {mode}")
     print(f"  Account type      : CASH (PDT rule does not apply)")
-    print(f"  Signal symbols    : QQQ, SMH, USO")
+    print(f"  Signal symbols    : QQQ, SMH  (2-symbol, best backtest)")
     print(f"  QQQ -> TQQQ/SQQQ  : Nasdaq-100 3x")
     print(f"  SMH -> SOXL/SOXS  : Semiconductor 3x")
-    print(f"  USO -> UCO/SCO    : Oil 2x")
     acct_val = 2000  # starting capital
     print(f"  Max Positions     : {PARAMS['max_positions']} (1 per signal symbol)")
     print(f"  Max Pos Size      : {int(PARAMS['max_position_pct']*100)}% of account (conviction-weighted split)")
@@ -147,7 +148,6 @@ def main():
     print("  Trade model (per symbol, 1 trade/day each):")
     print("  • QQQ BUY  -> TQQQ | QQQ SELL -> SQQQ | QQQ HOLD -> TQQQ (0.5x)")
     print("  • SMH BUY  -> SOXL | SMH SELL -> SOXS | SMH HOLD -> SOXL (0.5x)")
-    print("  • USO BUY  -> UCO  | USO SELL -> SCO  | USO HOLD -> UCO  (0.5x)")
     print("  • Re-entry blocked after STOP — 1 trade per symbol per session")
     print()
     print("  Exit logic:")
