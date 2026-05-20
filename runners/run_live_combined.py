@@ -120,7 +120,7 @@ def main():
     sentiment_configured = bool(os.getenv("SENTIMENT_ADMIN_TOKEN", ""))
 
     print("\n" + "=" * 65)
-    print("  🚀  TREND-FILTERED ORB — QQQ + SMH + USO INTRADAY BOT")
+    print("  🚀  TREND-FILTERED ORB — QQQ + SMH INTRADAY BOT")
     print("=" * 65)
     print(f"  Mode              : {mode}")
     print(f"  Account type      : CASH (PDT rule does not apply)")

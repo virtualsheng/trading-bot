@@ -487,7 +487,7 @@ ORB_ENTRY_END   = dtime(10, 45)  # 10:45 AM cutoff - late ORB entries have lower
 
 # All execution tickers - derived from leverage_map so adding a new symbol
 # to LEVERAGE_MAP automatically includes its ETFs here.
-LEVERAGED_TICKERS = get_all_exec_tickers()   # {"TQQQ","SQQQ","SOXL","SOXS"}
+LEVERAGED_TICKERS = get_all_exec_tickers()   # {"TQQQ","SQQQ","SOXL","SOXS","UCO","SCO"}
 
 
 def is_leveraged(ticker: str) -> bool:
@@ -506,7 +506,7 @@ class TrendFilteredORB(Strategy):
         "reward_ratio":              2.0,
         "eod_exit_time":             "15:50",   # 3:50 PM - force close all leveraged positions
         # Live defaults - backtest runner overrides these in PARAMS
-        "max_positions":             2,    # 2 trade at a time (QQQ, SMH)
+        "max_positions":             2,    # 3 trade at a time (QQQ, SMH, USO)
         "ai_min_confidence":         0.55,
         "hold_override":             False,
         "hold_override_size":        0.5,
