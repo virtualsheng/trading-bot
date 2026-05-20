@@ -557,8 +557,11 @@ class TrendFilteredORB(Strategy):
     #  Lifecycle 
 
     def initialize(self):
-        # Start with default sleeptime - switches to ORB speed at 9:45 AM
-        self.sleeptime = self.parameters.get("sleeptime_default", "5M")
+        # Always 2-minute iterations — LumiBot reads this at startup.
+        # We run 2M all day: during ORB window for entries, after for stop monitoring.
+        # When no position exists after 10:45 AM, on_trading_iteration returns
+        # immediately so 2M idle loops are effectively free.
+        self.sleeptime = "2M"
         self.set_market("NYSE")
 
         self._starting_capital     = self.portfolio_value
@@ -733,8 +736,6 @@ class TrendFilteredORB(Strategy):
         # Position monitoring (stop/trail/EM): active until position closes
         # Once ORB window closes and no positions held, only EOD signals matter
         in_orb = ORB_ENTRY_START <= now.time() <= ORB_ENTRY_END
-        if self.sleeptime != "2M":
-            self.sleeptime = "2M"
         if in_orb and not self._in_orb_window:
             self._in_orb_window = True
             self.log_message("ORB window open (9:45-10:45 AM)")

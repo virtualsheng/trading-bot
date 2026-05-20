@@ -62,8 +62,7 @@ def main():
 
     PARAMS = {
         # ── Iteration speed ───────────────────────────────────────────────
-        "sleeptime_orb":             "2M",   # 2-min during ORB window (9:45–noon)
-        "sleeptime_default":         "5M",   # 5-min rest of day
+        "sleeptime_orb":             "2M",   # always 2M — set at startup in initialize()
         "after_close_delay_minutes": 5,
 
         # ── Core ORB ──────────────────────────────────────────────────────
@@ -137,7 +136,7 @@ def main():
     print(f"  Trail stop        : {int(PARAMS['trail_stop_pct']*100)}% (ratchets up, never down)")
     print(f"  EM boundary exit  : {PARAMS['em_boundary_exit']} — close if price hits daily expected move")
     print(f"  ORB window        : 9:45 AM – 10:45 AM (entries only in this window)")
-    print(f"  ORB Iteration     : {PARAMS['sleeptime_orb']} during window; sleep if no position after")
+    print(f"  Iteration         : 2M all day (instant return when idle — no performance cost)")
     print(f"  AI Min Confidence : {PARAMS['ai_min_confidence']} (Ollama qwen3:8b)")
     print(f"  Trade Journal     : cache/trade_journal.db")
     print(f"  Log File          : {_log_file}")
