@@ -575,6 +575,7 @@ class TrendFilteredORB(Strategy):
         self._positions   = {}
         self._trade_ids             = {}
         self._pending_notifications = {}  # ticker -> payload, fires on Alpaca fill
+        self._notified_orders       = set()  # order IDs already emailed — prevents duplicates
         self._traded_today = set()  # symbols traded today - blocks re-entry
         self._daily_bias = self._load_bias()
         self._journal    = TradeJournal()
@@ -709,7 +710,50 @@ class TrendFilteredORB(Strategy):
 
     #  Main iteration 
 
+    def _check_recent_fills(self):
+        """
+        Poll recently filled orders and fire email notifications.
+        Called at the start of every on_trading_iteration.
+        LumiBot's on_filled() signature varies by version — this approach
+        is version-agnostic and guaranteed to work.
+        """
+        try:
+            orders = self.get_orders() or []
+            fill_time = self.get_datetime().strftime("%Y-%m-%d %H:%M:%S ET")
+
+            for order in orders:
+                try:
+                    status = getattr(order, "status", "")
+                    if status not in ("filled", "partially_filled"):
+                        continue
+
+                    # Build a unique ID for this fill
+                    order_id = getattr(order, "identifier",
+                                getattr(order, "id", None)) or str(order)
+                    if order_id in self._notified_orders:
+                        continue
+
+                    ticker     = order.asset.symbol if hasattr(order, "asset") else str(order)
+                    fill_price = float(order.avg_fill_price) if getattr(order, "avg_fill_price", None) else None
+                    side       = str(getattr(order, "side", "")).lower()
+                    qty        = int(order.quantity) if getattr(order, "quantity", None) else 0
+
+                    if not fill_price or fill_price <= 0 or not ticker:
+                        continue
+
+                    self._notified_orders.add(order_id)
+                    self._process_filled_order(ticker, fill_price, side, qty, fill_time)
+
+                except Exception as e:
+                    self.log_message(f"_check_recent_fills inner error: {e}")
+
+        except Exception as e:
+            self.log_message(f"_check_recent_fills error: {e}")
+
     def on_trading_iteration(self):
+        # Check for recently filled orders — fires email notifications promptly
+        self._check_recent_fills()
+
         now   = self.get_datetime()
         today = now.date()
 
@@ -883,23 +927,12 @@ class TrendFilteredORB(Strategy):
 
     #  Actual Fill Price Tracking 
 
-    def on_filled(self, order):
+    def _process_filled_order(self, ticker, fill_price, side, qty_filled, fill_time):
         """
-        Called by LumiBot when Alpaca confirms an order fill.
-        This is where we:
-          1. Update position entry_price / journal with actual fill price
-          2. Send the single notification email with ALL details including
-             actual Alpaca fill price, slippage, timestamp, and trade value.
-        No email is sent at order submission — only here after confirmation.
+        Process a confirmed order fill: update journal, send notification email.
+        Called from _check_recent_fills() which polls get_orders() each iteration.
         """
-        if order is None:
-            return
         try:
-            ticker     = order.asset.symbol if hasattr(order, "asset") else str(order.symbol)
-            fill_price = float(order.avg_fill_price) if order.avg_fill_price else None
-            side       = getattr(order, "side", "")
-            qty_filled = int(order.quantity) if order.quantity else 0
-            fill_time  = self.get_datetime().strftime("%Y-%m-%d %H:%M:%S ET")
 
             if fill_price is None or fill_price <= 0:
                 return
@@ -1010,7 +1043,7 @@ class TrendFilteredORB(Strategy):
                     )
 
         except Exception as e:
-            self.log_message(f"on_filled error: {e}")
+            self.log_message(f"_process_filled_order error: {e}")
 
     def _check_and_close_sell_signals(self, reason: str = "SELL_SIGNAL"):
         """
