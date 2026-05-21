@@ -103,6 +103,17 @@ def main():
         "target_scale_out":    1.0,    # unused
         "trail_stop_pct":      0.02,   # 2% trailing stop
         "em_boundary_exit":    True,   # close if price hits options EM upper boundary
+
+        # ── VIX filter (#4) ───────────────────────────────────────────────────
+        # Skip ALL entries if VIX >= 30 (extreme fear = gap-and-trap days)
+        # Halve position size if VIX 20–30 (elevated but still tradeable)
+        "vix_skip_above":      30,
+        "vix_half_size_above": 20,
+
+        # ── HOLD-bias volume gate (#6) ─────────────────────────────────────────
+        # HOLD-bias entries require vol_ratio >= 1.2 (20% above avg volume)
+        # Low-vol neutral-bias breakouts revert ~65% of the time
+        "hold_min_vol_ratio":  1.2,
     }
 
     broker   = Alpaca(BROKER_CONFIG)
@@ -171,6 +182,9 @@ def main():
     print("  ⚠️  CASH ACCOUNT: all leveraged ETFs close by 3:50 PM daily.")
     print("      Funds settle T+1 — available again next morning.")
     print()
+    print(f"  VIX skip >= {PARAMS['vix_skip_above']}   : skip ALL entries (extreme fear)")
+    print(f"  VIX half-size >= {PARAMS['vix_half_size_above']} : halve position size (elevated vol)")
+    print(f"  HOLD min vol  : {PARAMS['hold_min_vol_ratio']}x avg volume required for neutral-bias entries")
     print("  To stop: Ctrl+C")
     print("=" * 65 + "\n")
 

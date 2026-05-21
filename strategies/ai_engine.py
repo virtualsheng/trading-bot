@@ -26,7 +26,7 @@ from typing import Optional
 # ── Config ────────────────────────────────────────────────────────────────────
 OLLAMA_URL   = "http://localhost:11434/api/generate"
 OLLAMA_TAGS  = "http://localhost:11434/api/tags"
-OLLAMA_MODEL = "llama3.2:3b"
+OLLAMA_MODEL  = "qwen3:4b"    # best fit for Ryzen 7 7840HS iGPU
 TIMEOUT      = 25    # per-trade timeout; detect_regime() uses 30s override
 MAX_RETRIES  = 2     # total attempts = 1 + MAX_RETRIES = 3
 

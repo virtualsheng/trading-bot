@@ -506,7 +506,7 @@ class TrendFilteredORB(Strategy):
         "reward_ratio":              2.0,
         "eod_exit_time":             "15:50",   # 3:50 PM - force close all leveraged positions
         # Live defaults - backtest runner overrides these in PARAMS
-        "max_positions":             2,    # 3 trade at a time (QQQ, SMH, USO)
+        "max_positions":             2,    # 2 trade at a time (QQQ, SMH)
         "ai_min_confidence":         0.55,
         "hold_override":             False,
         "hold_override_size":        0.5,
@@ -552,6 +552,27 @@ class TrendFilteredORB(Strategy):
         #   Protects against stop-hunt wicks in the first 15 min.
         "stop_mode":           "or_low",
         "stop_delay_minutes":  15,
+
+        #  VIX filter (#4) 
+        # vix_skip_above: skip ALL entries if VIX >= this level at 9:45 AM
+        #   Rationale: when fear is extreme, ORB setups have far lower win rates.
+        #   Gap-and-trap opens, fast reversals, and stop-hunt wicks are common.
+        #   Default: 30 (matches CBOE's official "extreme fear" threshold)
+        # vix_half_size_above: reduce position size to 50% if VIX >= this level
+        #   Lets you participate in elevated-vol days but with controlled risk.
+        #   Default: 20 (elevated-but-not-extreme fear)
+        # Set vix_skip_above=999 to disable entirely (useful for backtesting).
+        "vix_skip_above":      30,
+        "vix_half_size_above": 20,
+
+        #  HOLD-bias volume gate (#6) 
+        # hold_min_vol_ratio: HOLD-bias entries (neutral EOD signal) require
+        #   volume >= this multiple of average to qualify.
+        #   Rationale: a breakout on below-average volume with no directional
+        #   EOD bias is likely noise — price reverts into the OR far more often.
+        #   Default: 1.2 (20% above average minimum)
+        #   Set to 0.0 to disable (accept any volume on HOLD-bias).
+        "hold_min_vol_ratio":  1.2,
     }
 
     #  Lifecycle 
@@ -824,6 +845,29 @@ class TrendFilteredORB(Strategy):
             self.log_message(
                 f"[ORB] {now.strftime('%H:%M')} | "                f"slots: {slots_free}/{max_pos} | "                f"cash: ${self.get_cash():,.0f} | "                f"positions: {list(self._positions.keys()) or 'none'}"
             )
+            # ── VIX gate (optimization #4) ────────────────────────────────────
+            # Check VIX once per ORB window entry, not every iteration
+            # (cached 10 min inside _get_vix_level).
+            vix_skip_above      = self.parameters.get("vix_skip_above",      30)
+            vix_half_size_above = self.parameters.get("vix_half_size_above", 20)
+            vix_level = None
+            if os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() != "true":
+                vix_level = self._get_vix_level()
+                if vix_level is not None:
+                    if vix_level >= vix_skip_above:
+                        self.log_message(
+                            f"[VIX] {vix_level:.1f} >= {vix_skip_above} — "
+                            f"skipping ALL entries today (extreme fear, ORB win rate drops sharply)"
+                        )
+                        return   # no entries today
+                    elif vix_level >= vix_half_size_above:
+                        self.log_message(
+                            f"[VIX] {vix_level:.1f} >= {vix_half_size_above} — "
+                            f"elevated volatility, position sizes halved"
+                        )
+                    else:
+                        self.log_message(f"[VIX] {vix_level:.1f} — normal, no size adjustment")
+
             if slots_free > 0:
                 candidates = []
                 skipped    = []
@@ -875,6 +919,34 @@ class TrendFilteredORB(Strategy):
                 )
 
     #  Safe Capital Calculation 
+
+    def _get_vix_level(self) -> float | None:
+        """
+        Fetch current VIX level from yfinance ^VIX.
+        Returns None on failure (treated as VIX unknown — don't skip, don't halve).
+        Cached for 10 minutes so we don't re-fetch every 2-min iteration.
+        """
+        now = self.get_datetime()
+        cached_vix = getattr(self, "_vix_cache", None)
+        cached_at  = getattr(self, "_vix_cached_at", None)
+        if cached_vix is not None and cached_at is not None:
+            age_min = (now - cached_at).total_seconds() / 60
+            if age_min < 10:
+                return cached_vix
+        try:
+            import yfinance as yf
+            vix_info = yf.Ticker("^VIX").fast_info
+            vix = (
+                getattr(vix_info, "last_price",         None) or
+                getattr(vix_info, "regularMarketPrice", None)
+            )
+            if vix:
+                self._vix_cache     = float(vix)
+                self._vix_cached_at = now
+                return self._vix_cache
+        except Exception as e:
+            self.log_message(f"[VIX] fetch failed: {e}")
+        return None
 
     def _get_safe_available_capital(self) -> float:
         """
@@ -1699,9 +1771,24 @@ class TrendFilteredORB(Strategy):
             exec_ticker = pair["bear"]
             self.log_message(f"[ORB] {symbol}: BREAKOUT DOWN ✓ → will trade {exec_ticker}")
         elif hold_bias and is_upside:
+            # HOLD-bias volume gate (optimization #6):
+            # Require vol_ratio >= hold_min_vol_ratio before entering on neutral bias.
+            # Low-volume breakouts on HOLD days revert into the OR ~65% of the time.
+            min_vol  = self.parameters.get("hold_min_vol_ratio", 1.2)
+            vol_now  = bias.get("vol_ratio", 1.0)
+            if vol_now < min_vol:
+                self.log_message(
+                    f"[ORB] {symbol}: SKIP HOLD-BIAS — vol_ratio {vol_now:.2f}x "
+                    f"< {min_vol:.1f}x required for neutral-bias entry "
+                    f"(low-volume breakouts on HOLD days have poor follow-through)"
+                )
+                return None
             is_inverse  = False
             exec_ticker = pair["bull"] if not direct else symbol
-            self.log_message(f"[ORB] {symbol}: HOLD-BIAS breakout up ✓ → will trade {exec_ticker} (0.5x size)")
+            self.log_message(
+                f"[ORB] {symbol}: HOLD-BIAS breakout up ✓ vol={vol_now:.2f}x >= {min_vol:.1f}x "
+                f"→ will trade {exec_ticker} (0.5x size)"
+            )
         else:
             if want_bull:
                 self.log_message(f"[ORB] {symbol}: NO BREAKOUT — BUY bias but price {current:.2f} hasn't cleared OR high {state['or_high']:.2f}")
@@ -1987,6 +2074,19 @@ class TrendFilteredORB(Strategy):
             safe_cap   # hard cap: can't spend more than we have in settled cash
         )
         risk_dollars  = self.portfolio_value * c.get("effective_risk", self.parameters["risk_pct"])
+
+        # VIX half-size: if elevated volatility, halve capital before sizing
+        vix_half_size_above = self.parameters.get("vix_half_size_above", 20)
+        vix_level           = getattr(self, "_vix_cache", None)
+        if (vix_level is not None
+                and vix_level >= vix_half_size_above
+                and os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() != "true"):
+            allocated_capital = allocated_capital * 0.5
+            self.log_message(
+                f"[VIX] {vix_level:.1f} — halving position size for {exec_ticker} "
+                f"(${allocated_capital * 2:,.0f} → ${allocated_capital:,.0f})"
+            )
+
         stop_dist     = abs(exec_current - c["initial_stop"])
         if stop_dist > 0 and exec_current > 0:
             qty_from_val  = int(allocated_capital / exec_current)
