@@ -97,14 +97,12 @@ PARAMS = {
     "min_breakout_pct":   0.001,  # price must clear OR high by at least 0.1%
 
     # ── VIX filter (#4) — DISABLED in backtest ───────────────────────────────
-    # Historical ^VIX is available via yfinance but adds API complexity and
-    # slows the backtest. Set vix_skip_above=999 to disable so backtest results
-    # are comparable to pre-filter baseline. Enable for VIX-filtered backtest.
-    "vix_skip_above":      999,   # effectively disabled in backtest
-    "vix_half_size_above": 999,   # effectively disabled in backtest
+    "vix_skip_above":      999,   # disabled — no live VIX in backtest simulation
+    "vix_half_size_above": 999,   # disabled
+    "vix_size_factor":     0.75,  # factor used when enabled in live
 
     # ── HOLD-bias volume gate (#6) ────────────────────────────────────────────
-    "hold_min_vol_ratio":  1.2,   # same as live — test its effect in backtest
+    "hold_min_vol_ratio":  0.7,   # matches live — slightly below avg is ok
 }
 
 RATE_LIMIT_DELAY = 13  # seconds between Polygon API pages (free tier: 5 req/min)

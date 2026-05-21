@@ -555,24 +555,32 @@ class TrendFilteredORB(Strategy):
 
         #  VIX filter (#4) 
         # vix_skip_above: skip ALL entries if VIX >= this level at 9:45 AM
-        #   Rationale: when fear is extreme, ORB setups have far lower win rates.
-        #   Gap-and-trap opens, fast reversals, and stop-hunt wicks are common.
-        #   Default: 30 (matches CBOE's official "extreme fear" threshold)
-        # vix_half_size_above: reduce position size to 50% if VIX >= this level
-        #   Lets you participate in elevated-vol days but with controlled risk.
-        #   Default: 20 (elevated-but-not-extreme fear)
+        #   Set to 40 — only fires on true crisis days (COVID spike hit 82,
+        #   2008 hit 80, April 2025 tariff crash hit ~52). VIX 30-40 is
+        #   scary but ORB with inverse ETFs (SQQQ/SOXS) can actually profit.
+        # vix_half_size_above: reduce position size to 75% if VIX >= this level
+        #   Set to 30 — only the peak crisis days get sized down.
+        #   0.75x (not 0.5x) — participate but with modest risk reduction.
+        # Historical context: VIX only exceeded 30 ONCE in the past year
+        #   (April 7, 2026 tariff crash). Setting skip at 30 would have
+        #   blocked the bot on one of its best trading opportunities (SQQQ run).
         # Set vix_skip_above=999 to disable entirely (useful for backtesting).
-        "vix_skip_above":      30,
-        "vix_half_size_above": 20,
+        "vix_skip_above":      40,
+        "vix_half_size_above": 30,
+        "vix_size_factor":     0.75,   # 0.75x size when VIX >= vix_half_size_above
 
         #  HOLD-bias volume gate (#6) 
         # hold_min_vol_ratio: HOLD-bias entries (neutral EOD signal) require
         #   volume >= this multiple of average to qualify.
         #   Rationale: a breakout on below-average volume with no directional
-        #   EOD bias is likely noise — price reverts into the OR far more often.
-        #   Default: 1.2 (20% above average minimum)
-        #   Set to 0.0 to disable (accept any volume on HOLD-bias).
-        "hold_min_vol_ratio":  1.2,
+        #   EOD bias is likely noise.
+        #   IMPORTANT: HOLD-bias entries are already 0.5x size — risk is already
+        #   managed. Setting this too high causes missed trades on quiet mornings.
+        #   Default: 0.8 (allow slightly below-average volume — log a warning
+        #   but still enter since the 0.5x sizing already limits risk).
+        #   Set to 0.0 to disable entirely.
+        #   Set to 1.2+ for stricter filtering (may miss trades on quiet days).
+        "hold_min_vol_ratio":  0.7,
     }
 
     #  Lifecycle 
@@ -863,7 +871,7 @@ class TrendFilteredORB(Strategy):
                     elif vix_level >= vix_half_size_above:
                         self.log_message(
                             f"[VIX] {vix_level:.1f} >= {vix_half_size_above} — "
-                            f"elevated volatility, position sizes halved"
+                            f"elevated volatility, position sizes reduced to {self.parameters.get('vix_size_factor', 0.75):.0%}"
                         )
                     else:
                         self.log_message(f"[VIX] {vix_level:.1f} — normal, no size adjustment")
@@ -2075,16 +2083,19 @@ class TrendFilteredORB(Strategy):
         )
         risk_dollars  = self.portfolio_value * c.get("effective_risk", self.parameters["risk_pct"])
 
-        # VIX half-size: if elevated volatility, halve capital before sizing
-        vix_half_size_above = self.parameters.get("vix_half_size_above", 20)
+        # VIX size reduction: if elevated volatility, reduce capital before sizing
+        vix_half_size_above = self.parameters.get("vix_half_size_above", 30)
+        vix_size_factor     = self.parameters.get("vix_size_factor",     0.75)
         vix_level           = getattr(self, "_vix_cache", None)
         if (vix_level is not None
                 and vix_level >= vix_half_size_above
                 and os.getenv("LUMIBOT_BACKTEST_MODE", "").lower() != "true"):
-            allocated_capital = allocated_capital * 0.5
+            original_cap      = allocated_capital
+            allocated_capital = allocated_capital * vix_size_factor
             self.log_message(
-                f"[VIX] {vix_level:.1f} — halving position size for {exec_ticker} "
-                f"(${allocated_capital * 2:,.0f} → ${allocated_capital:,.0f})"
+                f"[VIX] {vix_level:.1f} >= {vix_half_size_above} — "
+                f"reducing position size to {vix_size_factor:.0%} for {exec_ticker} "
+                f"(${original_cap:,.0f} → ${allocated_capital:,.0f})"
             )
 
         stop_dist     = abs(exec_current - c["initial_stop"])

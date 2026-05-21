@@ -105,15 +105,20 @@ def main():
         "em_boundary_exit":    True,   # close if price hits options EM upper boundary
 
         # ── VIX filter (#4) ───────────────────────────────────────────────────
-        # Skip ALL entries if VIX >= 30 (extreme fear = gap-and-trap days)
-        # Halve position size if VIX 20–30 (elevated but still tradeable)
-        "vix_skip_above":      30,
-        "vix_half_size_above": 20,
+        # Skip ALL entries if VIX >= 40 (true crisis: COVID/2008 level only)
+        # VIX 30-40 = scary but ORB + inverse ETFs can profit — don't skip
+        # Reduce size to 75% if VIX >= 30 (peak fear, modest risk reduction)
+        # Historical: VIX only exceeded 30 once in past year (April 7, 2026)
+        "vix_skip_above":      40,
+        "vix_half_size_above": 30,
+        "vix_size_factor":     0.75,   # 75% size when VIX >= vix_half_size_above
 
         # ── HOLD-bias volume gate (#6) ─────────────────────────────────────────
-        # HOLD-bias entries require vol_ratio >= 1.2 (20% above avg volume)
-        # Low-vol neutral-bias breakouts revert ~65% of the time
-        "hold_min_vol_ratio":  1.2,
+        # HOLD-bias entries already use 0.5x size — risk is already managed.
+        # Requiring 0.8x volume (slightly below avg) keeps most trades active
+        # while still filtering out the truly dead-volume entries.
+        # Raise to 1.2+ for stricter filtering (risks missing morning trades).
+        "hold_min_vol_ratio":  0.7,
     }
 
     broker   = Alpaca(BROKER_CONFIG)
