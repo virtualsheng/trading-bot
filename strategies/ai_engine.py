@@ -1,181 +1,135 @@
 """
-ai_engine.py — AI-Powered Trade Analysis via Ollama
-────────────────────────────────────────────────────
-Provides three capabilities:
-  1. setup_grader:     Grades a breakout setup from OHLC candles (0.0–1.0 confidence)
-  2. regime_detector:  Classifies market regime from multi-timeframe data
-  3. trade_narrator:   Generates a plain-English journal entry for a trade
+strategies/ai_engine.py — AI-Powered Trade Analysis
+─────────────────────────────────────────────────────
+Provider priority (auto-fallback):
+  1. Gemini (gemini-2.0-flash-lite) — free 1,500 req/day, frontier quality
+  2. Groq  (qwen3-32b)              — free 14,400 req/day, very fast
+  3. Ollama (qwen3:4b local)        — offline fallback, no API key needed
 
-Uses Ollama running locally — no API key needed, no cost.
-Default model: llama3.2:3b (fast, low RAM)
-Fallback: returns neutral scores if Ollama is unreachable.
+Set in .env:
+  GEMINI_API_KEY=AIza...    # aistudio.google.com — free, no credit card
+  GROQ_API_KEY=gsk_...      # console.groq.com   — free, no credit card
 
-Reliability:
-  - Warmup with realistic regime prompt primes KV cache before first detect_regime()
-  - Retry up to MAX_RETRIES times with exponential backoff on timeout
-  - TIMEOUT = 25s (raised from 15s) — reduces first-attempt misses
-  - detect_regime() uses 5 bars per timeframe in prompt (reduced from 10)
-    to halve generation time on llama3.2:3b, eliminating 30s timeouts
+Capabilities:
+  1. grade_setup()       — grades ORB breakout setup (confidence 0.0–1.0)
+  2. detect_regime()     — classifies market regime from multi-timeframe bars
+  3. generate_narrative()— plain-English journal entry for a completed trade
 """
 
 import json
+import os
+import sys
 import time
-import requests
-from typing import Optional
 
-# ── Config ────────────────────────────────────────────────────────────────────
-OLLAMA_URL   = "http://localhost:11434/api/generate"
-OLLAMA_TAGS  = "http://localhost:11434/api/tags"
-OLLAMA_MODEL  = "qwen3:4b"    # best fit for Ryzen 7 7840HS iGPU
-TIMEOUT      = 25    # per-trade timeout; detect_regime() uses 30s override
-MAX_RETRIES  = 2     # total attempts = 1 + MAX_RETRIES = 3
+# llm_router.py lives in the same strategies/ directory
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from llm_router import llm_call, llm_call_text, llm_available, llm_provider_status
 
-_ollama_available = None  # None = not yet checked
+MAX_RETRIES = 2
 
 
 def check_ollama_available() -> bool:
     """
-    Check if Ollama is running and the model is loaded.
-    Warms up with a regime-shaped prompt to prime the KV cache so the
-    first real detect_regime() call is fast.
+    Renamed: check_ai_available() — kept as check_ollama_available()
+    for backward compatibility with callers in trend_filtered_orb.py.
+    Returns True if ANY provider (Gemini, Groq, Ollama) is available.
+    Prints provider status table at startup.
     """
-    global _ollama_available
-    try:
-        resp = requests.get(OLLAMA_TAGS, timeout=5)
-        if resp.status_code != 200:
-            print(f"[ai_engine] Ollama not reachable (HTTP {resp.status_code})")
-            _ollama_available = False
-            return False
+    status = llm_provider_status()
+    order  = status["active_order"]
+    active = []
 
-        models     = [m.get("name", "") for m in resp.json().get("models", [])]
-        model_base = OLLAMA_MODEL.split(":")[0]
-        if not any(model_base in m for m in models):
-            print(f"[ai_engine] Model '{OLLAMA_MODEL}' not found. Run: ollama pull {OLLAMA_MODEL}")
-            _ollama_available = False
-            return False
+    for p in ["gemini", "groq", "ollama"]:
+        s = status[p]
+        if s["configured"]:
+            marker = "✓" if p in order else "–"
+            active.append(f"{marker} {p.upper():<8} {s['model']}")
 
-        print(f"[ai_engine] Warming up Ollama ({OLLAMA_MODEL})...")
-        warmup_prompt = (
-            "You are a quantitative analyst. Given this market data for QQQ: "
-            "5m bars show higher highs and higher lows, RSI=55, ATR=1.2. "
-            "Classify the regime as one of: trending_up, trending_down, "
-            "ranging, mean_reversion, volatile, low_liquidity. "
-            'Reply with ONLY this JSON: {"regime":"trending_up","confidence":0.8,'
-            '"orb_suitability":"good","stop_adjustment":1.0,'
-            '"target_adjustment":1.0,"reasoning":"Warmup probe."}'
-        )
-        warmup_resp = requests.post(
-            OLLAMA_URL,
-            json={
-                "model":  OLLAMA_MODEL,
-                "prompt": warmup_prompt,
-                "stream": False,
-                "options": {"num_predict": 80, "temperature": 0},
-            },
-            timeout=60,
-        )
-        if warmup_resp.status_code == 200:
-            print("[ai_engine] Ollama ready — model loaded and warmed")
-            _ollama_available = True
-            return True
-        print(f"[ai_engine] Ollama warmup failed (HTTP {warmup_resp.status_code})")
-        _ollama_available = False
-        return False
+    if not active:
+        active = ["  no providers configured — all AI grading disabled"]
 
-    except requests.exceptions.ConnectionError:
-        print("[ai_engine] Ollama not running — start with: ollama serve")
-        _ollama_available = False
-        return False
-    except Exception as e:
-        print(f"[ai_engine] Ollama check failed: {e}")
-        _ollama_available = False
-        return False
+    print("[ai_engine] Provider status:")
+    for line in active:
+        print(f"  {line}")
+
+    available = llm_available()
+    if available:
+        print(f"[ai_engine] Ready — priority: {' → '.join(order)}")
+    else:
+        print("[ai_engine] No AI providers available — fallback mode")
+    return available
 
 
-def _call_ollama(prompt: str, model: str = OLLAMA_MODEL,
-                 timeout: int = None) -> Optional[str]:
-    """Raw Ollama call with exponential backoff retry on timeout."""
-    global _ollama_available
-    if _ollama_available is False:
-        return None
-
-    t = timeout if timeout is not None else TIMEOUT
-
-    for attempt in range(1 + MAX_RETRIES):
-        try:
-            resp = requests.post(
-                OLLAMA_URL,
-                json={
-                    "model":  model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 400},
-                },
-                timeout=t,
-            )
-            if resp.status_code == 200:
-                _ollama_available = True
-                if attempt > 0:
-                    print(f"[ai_engine] Ollama succeeded on retry {attempt}")
-                return resp.json().get("response", "").strip()
-            return None
-
-        except requests.exceptions.Timeout:
-            if attempt < MAX_RETRIES:
-                wait = 2 ** (attempt + 1)
-                print(
-                    f"[ai_engine] Ollama timed out after {t}s "
-                    f"(attempt {attempt+1}/{1+MAX_RETRIES}) — retrying in {wait}s..."
-                )
-                time.sleep(wait)
-            else:
-                print(
-                    f"[ai_engine] Ollama timed out after {t}s — "
-                    f"all {1+MAX_RETRIES} attempts exhausted, using fallback"
-                )
-        except Exception as e:
-            print(f"[ai_engine] Ollama call error: {e}")
-            return None
-
-    return None
-
-
-def _parse_json_from_response(text: str) -> dict:
-    """Extract JSON from LLM response, tolerating markdown fences and <think> blocks."""
-    if not text:
-        return {}
-    text = text.strip()
-    if "<think>" in text:
-        end = text.find("</think>")
-        if end != -1:
-            text = text[end + 8:].strip()
-    if "```" in text:
-        parts = text.split("```")
-        if len(parts) >= 2:
-            text = parts[1]
-            if text.startswith("json"):
-                text = text[4:]
-    start = text.find("{")
-    end   = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        text = text[start:end+1]
-    try:
-        return json.loads(text.strip())
-    except Exception:
-        return {}
-
-
-# ── Fallbacks ─────────────────────────────────────────────────────────────────
+# ── Grade a breakout setup ────────────────────────────────────────────────────
 
 _GRADE_FALLBACK = {
     "confidence":           0.60,
-    "reasoning":            "AI grading unavailable — using default confidence",
+    "reasoning":            "AI unavailable — using default confidence",
     "flags":                ["ai_unavailable"],
-    "volume_quality":       "unknown",
-    "price_action_quality": "unknown",
     "approve":              True,
     "size_multiplier":      0.5,
 }
+
+
+def grade_setup(
+    symbol:        str,
+    direction:     str,
+    or_range_pct:  float,
+    breakout_pct:  float,
+    vol_ratio:     float,
+    rsi:           float,
+    atr_pct:       float,
+    regime:        str,
+    current_price: float,
+    avg_volume:    float,
+) -> dict:
+    """
+    Grade a breakout setup. Returns dict with:
+      confidence (0.0–1.0), approve (bool), size_multiplier (0.5–2.0),
+      reasoning (str), flags (list)
+    """
+    prompt = f"""You are a quantitative trader grading an intraday ORB breakout setup.
+Respond ONLY with valid JSON — no markdown, no explanation.
+
+Setup:
+  Symbol:      {symbol}
+  Direction:   {direction} (BULL=long via leveraged ETF, BEAR=inverse ETF)
+  OR range:    {or_range_pct:.2f}% of price
+  Breakout:    +{breakout_pct:.2f}% above OR high
+  Volume:      {vol_ratio:.2f}x average ({avg_volume:,.0f} avg)
+  RSI(14):     {rsi:.1f}
+  ATR/price:   {atr_pct:.2f}%
+  Regime:      {regime}
+  Price:       ${current_price:.2f}
+
+Grade this setup and respond with exactly this JSON:
+{{
+  "confidence":      <float 0.0-1.0>,
+  "approve":         <true|false>,
+  "size_multiplier": <0.5|0.75|1.0|1.25|1.5|2.0>,
+  "reasoning":       "<one sentence, specific to this setup>",
+  "flags":           ["<flag1>", "<flag2>"]
+}}
+
+Flags to use when relevant: low_volume, overbought_rsi, wide_or_range,
+  thin_breakout, strong_regime_alignment, volume_surge, tight_setup.
+Set approve=false only for clearly weak setups (vol_ratio < 0.5, rsi > 80, 
+  or_range_pct > 5%, breakout_pct < 0.05%)."""
+
+    result = llm_call(prompt, expect_json=True, timeout=20, tag=f"grade/{symbol}")
+
+    if result and "confidence" in result:
+        return {
+            "confidence":      round(float(result.get("confidence", 0.6)), 3),
+            "approve":         bool(result.get("approve", True)),
+            "size_multiplier": float(result.get("size_multiplier", 1.0)),
+            "reasoning":       str(result.get("reasoning", "")),
+            "flags":           list(result.get("flags", [])),
+        }
+    return _GRADE_FALLBACK.copy()
+
+
+# ── Detect market regime ──────────────────────────────────────────────────────
 
 _REGIME_FALLBACK = {
     "regime":            "unknown",
@@ -187,163 +141,134 @@ _REGIME_FALLBACK = {
 }
 
 
-# ── 1. Setup Grader ───────────────────────────────────────────────────────────
-
-def grade_setup(
-    symbol: str,
-    direction: str,
-    candles: list,
-    or_high: float,
-    or_low: float,
-    current_price: float,
-    avg_volume: float,
+def detect_regime(
+    symbol:     str,
+    bars_5m:    list[dict],
+    bars_15m:   list[dict],
+    bars_1h:    list[dict],
 ) -> dict:
-    """Grade an ORB breakout setup. Returns confidence 0.0–1.0 + size multiplier."""
-    if not candles:
-        return _GRADE_FALLBACK.copy()
+    """
+    Classify market regime from multi-timeframe OHLCV bars.
+    bars_*: list of {open, high, low, close, volume} dicts, newest last.
+    Returns regime dict with orb_suitability and stop/target adjustments.
+    """
+    def fmt_bars(bars: list[dict], n: int = 5) -> str:
+        recent = bars[-n:]
+        return " | ".join(
+            f"O={b['open']:.2f} H={b['high']:.2f} L={b['low']:.2f} "
+            f"C={b['close']:.2f} V={b.get('volume', 0):,.0f}"
+            for b in recent
+        )
 
-    candle_str = "\n".join(
-        f"  {i+1:2d}. O:{c['o']:.2f} H:{c['h']:.2f} L:{c['l']:.2f} "
-        f"C:{c['c']:.2f} V:{int(c.get('v', 0))}"
-        for i, c in enumerate(candles[-25:])
-    )
-    latest_vol   = candles[-1].get("v", 0) if candles else 0
-    vol_ratio    = latest_vol / avg_volume if avg_volume > 0 else 1.0
-    or_range     = or_high - or_low
-    breakout_ext = abs(current_price - (or_high if direction == "LONG" else or_low))
-    ext_pct      = (breakout_ext / or_range * 100) if or_range > 0 else 0
+    prompt = f"""Classify the current intraday market regime for {symbol}.
+Respond ONLY with valid JSON — no markdown.
 
-    prompt = f"""You are an expert intraday trader analyzing an Opening Range Breakout (ORB) setup.
+Recent bars (newest last):
+5-min  (last 5): {fmt_bars(bars_5m,  5)}
+15-min (last 5): {fmt_bars(bars_15m, 5)}
+1-hour (last 3): {fmt_bars(bars_1h,  3)}
 
-TRADE SETUP:
-Symbol:    {symbol}
-Direction: {direction}
-OR High:   {or_high:.2f}
-OR Low:    {or_low:.2f}
-OR Range:  {or_range:.2f} ({or_range/max(current_price,0.01)*100:.1f}% of price)
-Current:   {current_price:.2f}
-Breakout extension: {breakout_ext:.2f} ({ext_pct:.0f}% beyond OR boundary)
-Volume ratio vs morning avg: {vol_ratio:.2f}x
+Regimes: trending_up | trending_down | ranging | mean_reversion | volatile | low_liquidity
 
-LAST 25 FIVE-MINUTE CANDLES (oldest to newest):
-{candle_str}
-
-Return ONLY this JSON (no other text, no markdown):
 {{
-  "confidence": <0.0 to 1.0>,
-  "reasoning": "<2-3 sentences>",
-  "flags": ["<flag1>"],
-  "volume_quality": "<low|normal|strong>",
-  "price_action_quality": "<weak|moderate|strong>",
-  "approve": <true if confidence >= 0.55>
+  "regime":            "<regime>",
+  "confidence":        <0.0-1.0>,
+  "orb_suitability":   "<good|moderate|poor>",
+  "stop_adjustment":   <0.8-1.5>,
+  "target_adjustment": <0.8-1.5>,
+  "reasoning":         "<one sentence>"
 }}
 
-Flags: coiling, parabolic, low_volume, strong_volume, momentum, choppy, overextended, tight_setup"""
+stop_adjustment > 1.0 means widen stops (volatile), < 1.0 means tighten.
+orb_suitability=poor means skip ORB entries today."""
 
-    response = _call_ollama(prompt)
-    data     = _parse_json_from_response(response)
+    result = llm_call(prompt, expect_json=True, timeout=20, tag=f"regime/{symbol}")
 
-    if not data or "confidence" not in data:
-        return _GRADE_FALLBACK.copy()
-
-    confidence              = round(float(data.get("confidence", 0.60)), 3)
-    data["confidence"]      = confidence
-    data["approve"]         = confidence >= 0.55
-    data["size_multiplier"] = _confidence_to_size(confidence)
-    return data
-
-
-def _confidence_to_size(confidence: float) -> float:
-    if confidence >= 0.90: return 2.0
-    if confidence >= 0.75: return 1.5
-    if confidence >= 0.65: return 1.0
-    if confidence >= 0.55: return 0.5
-    return 0.0
+    if result and "regime" in result:
+        out = {
+            "regime":            str(result.get("regime",            "unknown")),
+            "confidence":        round(float(result.get("confidence", 0.5)), 3),
+            "orb_suitability":   str(result.get("orb_suitability",   "moderate")),
+            "stop_adjustment":   float(result.get("stop_adjustment",  1.0)),
+            "target_adjustment": float(result.get("target_adjustment",1.0)),
+            "reasoning":         str(result.get("reasoning",          "")),
+        }
+        REGIME_CACHE[symbol] = out   # keep get_cached_regime() current
+        return out
+    return _REGIME_FALLBACK.copy()
 
 
-# ── 2. Regime Detector ────────────────────────────────────────────────────────
+# ── Generate trade narrative ──────────────────────────────────────────────────
 
-REGIME_CACHE = {}
-
-
-def detect_regime(
-    symbol: str,
-    bars_5m:  list,
-    bars_15m: list,
-    bars_1h:  list,
-    rsi_14:   float,
-    atr_14:   float,
-) -> dict:
+def generate_narrative(
+    symbol:       str,
+    direction:    str,
+    entry_price:  float,
+    exit_price:   float,
+    pnl:          float,
+    pnl_pct:      float,
+    exit_reason:  str,
+    hold_minutes: int,
+    regime:       str,
+    confidence:   float,
+) -> str:
     """
-    Classify market regime from multi-timeframe bar data.
-    Uses 5 bars per timeframe in the prompt (trimmed from whatever is passed in)
-    to keep prompt size small and generation fast on llama3.2:3b.
+    Generate a 2-3 sentence plain-English journal entry for a completed trade.
     """
-    def fmt_bars(bars: list, label: str) -> str:
-        if not bars:
-            return f"  {label}: (no data)"
-        lines = [f"  {label}:"]
-        for b in bars[-5:]:   # 5 bars per timeframe — keeps prompt fast
-            lines.append(
-                f"    O:{b['o']:.2f} H:{b['h']:.2f} "
-                f"L:{b['l']:.2f} C:{b['c']:.2f} V:{int(b.get('v', 0))}"
-            )
-        return "\n".join(lines)
+    prompt = f"""Write a 2-3 sentence trade journal entry for this intraday trade.
+Plain prose, no bullets, no markdown. Be specific about what worked or didn't.
 
-    prompt = f"""You are a quantitative analyst classifying market regime in real-time.
+Trade: {direction} {symbol}
+Entry: ${entry_price:.2f} → Exit: ${exit_price:.2f}
+P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)
+Exit reason: {exit_reason}
+Hold time: {hold_minutes} minutes
+Regime: {regime} | AI confidence at entry: {confidence:.0%}"""
 
-SYMBOL: {symbol}
-RSI(14): {rsi_14:.1f}
-ATR(14): {atr_14:.2f}
+    result = llm_call_text(prompt, timeout=15, tag=f"narrative/{symbol}")
 
-RECENT MULTI-TIMEFRAME DATA (5 bars each, oldest to newest):
-{fmt_bars(bars_5m, '5-minute')}
-{fmt_bars(bars_15m, '15-minute')}
-{fmt_bars(bars_1h, '1-hour')}
+    if result and len(result.strip()) > 20:
+        return result.strip()
 
-Return ONLY this JSON (no markdown):
-{{
-  "regime": "<trending_up|trending_down|ranging|volatile|mean_reversion|low_liquidity>",
-  "confidence": <0.0 to 1.0>,
-  "orb_suitability": "<good|moderate|poor>",
-  "stop_adjustment": <0.8 to 1.5>,
-  "target_adjustment": <0.8 to 1.5>,
-  "reasoning": "<1-2 sentences>"
-}}"""
+    direction_word = "long" if "BULL" in direction.upper() else "short (inverse ETF)"
+    outcome = "profitable" if pnl >= 0 else "stopped out"
+    return (
+        f"Took a {direction_word} position in {symbol} at ${entry_price:.2f}. "
+        f"Trade was {outcome} at ${exit_price:.2f} ({pnl:+.2f}, {pnl_pct:+.1f}%) "
+        f"after {hold_minutes} minutes via {exit_reason}."
+    )
 
-    response = _call_ollama(prompt, timeout=30)
-    data     = _parse_json_from_response(response)
 
-    if not data or "regime" not in data:
-        return _REGIME_FALLBACK.copy()
+# ── Backward-compatibility aliases ────────────────────────────────────────────
+# trend_filtered_orb.py imports these names — keep them working.
 
-    REGIME_CACHE[symbol] = data
-    return data
+REGIME_CACHE: dict = {}
 
 
 def get_cached_regime(symbol: str) -> dict:
+    """Return last cached regime for symbol, or fallback."""
     return REGIME_CACHE.get(symbol, _REGIME_FALLBACK.copy())
 
 
-# ── 3. Trade Narrator ─────────────────────────────────────────────────────────
-
 def narrate_trade(trade_record: dict) -> str:
-    """Generate a plain-English journal entry for a completed trade."""
-    safe_record = {}
-    for k, v in trade_record.items():
-        try:
-            json.dumps(v)
-            safe_record[k] = v
-        except Exception:
-            safe_record[k] = str(v)
+    """
+    Generate narrative from a trade record dict.
+    Alias for generate_narrative() using dict fields.
+    """
+    return generate_narrative(
+        symbol       = trade_record.get("symbol",       "?"),
+        direction    = trade_record.get("direction",    "BULL"),
+        entry_price  = float(trade_record.get("entry_price",  0)),
+        exit_price   = float(trade_record.get("exit_price",   0)),
+        pnl          = float(trade_record.get("pnl",          0)),
+        pnl_pct      = float(trade_record.get("pnl_pct",      0)),
+        exit_reason  = trade_record.get("exit_reason",  "unknown"),
+        hold_minutes = int(trade_record.get("hold_minutes",   0)),
+        regime       = trade_record.get("regime",       "unknown"),
+        confidence   = float(trade_record.get("ai_confidence", 0.6)),
+    )
 
-    prompt = f"""Write a 2-3 sentence trade journal entry for this completed trade.
-Be analytical and specific. Mention what worked or what could be improved.
 
-Trade:
-{json.dumps(safe_record, indent=2)}
-
-Return ONLY the journal text, no JSON, no labels."""
-
-    response = _call_ollama(prompt)
-    return response if response else "Narrative unavailable."
+def _patch_regime_cache(symbol: str, data: dict):
+    """Called by detect_regime() to keep REGIME_CACHE updated."""
+    REGIME_CACHE[symbol] = data
